@@ -1,0 +1,230 @@
+<!doctype html>
+<html><head><meta charset="utf-8"></head>
+<body>
+<div id="out">running</div>
+<iframe id="f" src="/" style="width:1400px;height:900px"></iframe>
+<script>
+const lines = [];
+let fails = 0;
+function check(label, got, want) {
+  const ok = String(got) === String(want);
+  if (!ok) fails++;
+  lines.push((ok ? "PASS  " : "FAIL  ") + label + "  got=" + got + "  want=" + want);
+}
+function note(t) { lines.push("      . " + t); }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms = 9000, what) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    let v; try { v = fn(); } catch (e) { v = null; }
+    if (v) return v;
+    await sleep(120);
+  }
+  lines.push("      ! timed out waiting" + (what ? " for " + what : "") + " after " + ms + "ms");
+  return null;
+}
+
+function flush(err) {
+  const head = err ? "ERROR " + err : (fails ? "FAIL(" + fails + ")" : "ALLPASS");
+  document.getElementById("out").textContent = "RESULT " + head + "\n" + lines.join("\n");
+}
+
+document.getElementById("f").addEventListener("load", async () => {
+  try { await run(); flush(); }
+  catch (e) { flush((e && e.message) + " | " + ((e && e.stack) || "").split("\n").slice(0, 3).join(" <- ")); }
+});
+
+async function run() {
+  const w = document.getElementById("f").contentWindow;
+  const d = w.document;
+  const disp = (id) => { const e = d.getElementById(id); return e ? w.getComputedStyle(e).display : "MISSING"; };
+  const rows = () => d.querySelectorAll('.row[data-path]').length;
+  const counter = () => (d.getElementById("result-count") || {}).textContent || "";
+  const key = (k, opts) => d.dispatchEvent(new w.KeyboardEvent("keydown", Object.assign({ key: k, bubbles: true }, opts || {})));
+
+  await until(() => d.querySelectorAll(".hist-item").length > 0);
+
+  // ---------------------------------------------------------------- typography
+  await w.document.fonts.ready;
+  check("Martian Mono loaded", w.document.fonts.check('12px "Martian Mono"'), true);
+  check("Bodoni Moda loaded", w.document.fonts.check('28px "Bodoni Moda"'), true);
+  check("JetBrains Mono loaded", w.document.fonts.check('12px "JetBrains Mono"'), true);
+  check("Archivo loaded", w.document.fonts.check('13px "Archivo"'), true);
+  const wm = w.getComputedStyle(d.querySelector(".wordmark")).fontFamily;
+  check("wordmark uses display face", /Bodoni/.test(wm), true);
+  const lbl = w.getComputedStyle(d.querySelector(".rail-block h3")).fontFamily;
+  check("rail labels use Martian Mono", /Martian/.test(lbl), true);
+
+  // ----------------------------------------------------------- startup layout
+  check("#help-modal hidden", disp("help-modal"), "none");
+  check("#palette hidden", disp("palette"), "none");
+  check("#viewer hidden", disp("viewer"), "none");
+  check("#split-handle hidden", disp("split-handle"), "none");
+  check("7 views in nav", d.querySelectorAll(".view-item").length, 7);
+
+  // ------------------------------------------------------------- load a scan
+  const target = [...d.querySelectorAll(".hist-item")]
+    .find((el) => el.textContent.includes("juice-shop")) || d.querySelector(".hist-item");
+  note("loading " + target.querySelector(".hist-slug").textContent);
+  target.click();
+  await until(() => d.querySelector(".repo-title") && rows() > 0);
+  check("repo header appears", !!d.querySelector(".repo-title"), true);
+  check("risk rows rendered", rows() > 50, true);
+  note("counter: " + counter());
+  const baseRows = rows();
+
+  // ------------------------------------------------------ new data viz bits
+  check("score histogram rendered", d.querySelectorAll(".histo-bars i").length, 20);
+  check("weakness mix bar rendered", d.querySelectorAll(".mixbar i").length > 3, true);
+  check("mix legend rendered", d.querySelectorAll(".mixleg").length > 3, true);
+  check("score meters rendered", d.querySelectorAll(".row .meter i").length > 10, true);
+  check("triage tally rendered", d.querySelectorAll(".tri-cell").length, 3);
+  check("band cells clickable", d.querySelectorAll(".bandcell[data-band]").length, 5);
+
+  // clicking a mix legend filters by weakness class
+  const leg = d.querySelector(".mixleg");
+  const cat = leg.dataset.cat;
+  leg.click();
+  await sleep(400);
+  const catRows = rows();
+  check("class filter narrows list", catRows > 0 && catRows < baseRows, true);
+  note("class " + cat + " -> " + catRows + " rows");
+  d.querySelector('.mixleg[data-cat="' + cat + '"]').click();
+  await sleep(400);
+  check("unsetting class filter restores list", rows(), baseRows);
+
+  // clicking a band cell in the rail filters and syncs the chip
+  d.querySelector('.bandcell[data-band="high"]').click();
+  await sleep(400);
+  check("rail band cell filters", rows() < baseRows && rows() > 0, true);
+  check("band chip synced from rail", d.querySelector('.chip[data-band="high"]').classList.contains("on"), true);
+  d.querySelector('.bandcell[data-band="high"]').click();
+  await sleep(400);
+
+  // --------------------------------------------------------------- viewer
+  const row = d.querySelector(".row[data-path]");
+  const path = row.dataset.path;
+  note("opening " + path);
+  row.click();
+  await until(() => disp("viewer") === "flex" && d.querySelectorAll(".cl").length > 0);
+  check("viewer opens", disp("viewer"), "flex");
+  check("split handle appears", disp("split-handle"), "block");
+  check("syntax highlighting", !!d.querySelector('[class*="pg-"]'), true);
+  check("hit lines marked", d.querySelectorAll(".cl.hit").length > 0, true);
+  check("minimap marks rendered", d.querySelectorAll("#minimap i").length > 0, true);
+  check("minimap viewport indicator", !!d.getElementById("mm-view"), true);
+
+  // n / p step through hits
+  key("n");
+  await sleep(500);
+  const cur1 = d.querySelector(".cl.cur");
+  check("n moves to a hit line", !!cur1, true);
+  const id1 = cur1 && cur1.id;
+  key("n");
+  await sleep(500);
+  const id2 = (d.querySelector(".cl.cur") || {}).id;
+  check("n advances to the next hit", id2 !== id1, true);
+  key("p");
+  await sleep(500);
+  check("p goes back", (d.querySelector(".cl.cur") || {}).id, id1);
+
+  // ---------------------------------------------------------------- triage
+  d.getElementById("btn-triage").click();
+  await until(() => d.querySelector("#vt-meta .trimark"));
+  check("mark button sets triage", !!d.querySelector("#vt-meta .trimark"), true);
+  check("triage tally counts it", [...d.querySelectorAll(".tri-cell .tc-n")].some((e) => e.textContent !== "0"), true);
+  note("state after 1 press: " + d.querySelector("#vt-meta .trimark").textContent.trim());
+  key("t");                        // looking -> confirmed
+  await until(() => /confirmed/.test(d.querySelector("#vt-meta .trimark").textContent));
+  check("t cycles to confirmed", /confirmed/.test(d.querySelector("#vt-meta .trimark").textContent), true);
+  check("triage badge on view nav", !!d.querySelector(".view-item .vbadge"), true);
+
+  // the triage board should now list it
+  d.querySelector('.view-item[data-view="triage"]').click();
+  await until(() => d.querySelectorAll(".row[data-path]").length > 0);
+  check("triage board lists the marked file",
+    [...d.querySelectorAll(".row[data-path]")].some((el) => el.dataset.path === path), true);
+  check("triage board group label", !!d.querySelector(".gh-label"), true);
+
+  // clean up: unmark so repeat runs start clean
+  key("t");  await sleep(600);     // confirmed -> dismissed
+  key("t");  await sleep(600);     // dismissed -> unmarked
+  check("triage clears back to unmarked", !d.querySelector("#vt-meta .trimark"), true);
+
+  // -------------------------------------------------------------- palette
+  key("k", { ctrlKey: true });
+  await until(() => disp("palette") === "flex");
+  check("ctrl+k opens the palette", disp("palette"), "flex");
+  await until(() => d.querySelectorAll(".pal-item").length > 0);
+  check("palette lists files", d.querySelectorAll(".pal-item").length > 0, true);
+  const inp = d.getElementById("pal-input");
+  inp.value = "login";
+  inp.dispatchEvent(new w.Event("input", { bubbles: true }));
+  await sleep(350);
+  const first = d.querySelector(".pal-item .pal-path");
+  check("fuzzy search matches", /login/i.test(first.textContent), true);
+  check("match characters highlighted", !!d.querySelector(".pal-item .pal-path b"), true);
+  note("top palette hit: " + first.textContent.trim());
+  inp.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await until(() => disp("palette") === "none");
+  check("enter opens the file and closes palette", disp("palette"), "none");
+  await until(() => /login/i.test(d.getElementById("vt-path").textContent), 9000, "the chosen file to open");
+  check("viewer now shows the chosen file", /login/i.test(d.getElementById("vt-path").textContent), true);
+
+  // command mode
+  key("k", { ctrlKey: true });
+  await until(() => disp("palette") === "flex");
+  const inp2 = d.getElementById("pal-input");
+  inp2.value = ">hotspot";
+  inp2.dispatchEvent(new w.Event("input", { bubbles: true }));
+  await sleep(350);
+  check("command mode switches sigil", d.getElementById("pal-sigil").textContent, "cmd");
+  await until(() => d.querySelector(".pal-item"), 4000, "a command match for >hotspot");
+  const cmdHit = d.querySelector(".pal-item");
+  check("command matched by view id", cmdHit && /Directory Heat/i.test(cmdHit.textContent), true);
+  inp2.dispatchEvent(new w.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await until(() => d.querySelectorAll(".hs-row").length > 0);
+  check("command switched the view", d.querySelectorAll(".hs-row").length > 0, true);
+
+  // ---------------------------------------------------------- density + split
+  const rowPadBefore = w.getComputedStyle(d.documentElement).getPropertyValue("--row-pad").trim();
+  d.getElementById("btn-density").click();
+  await sleep(250);
+  const rowPadAfter = w.getComputedStyle(d.documentElement).getPropertyValue("--row-pad").trim();
+  check("density toggle changes row padding", rowPadAfter !== rowPadBefore, true);
+  note("row padding " + rowPadBefore + " -> " + rowPadAfter);
+  d.getElementById("btn-density").click();
+  await sleep(250);
+
+  d.querySelector('.view-item[data-view="risk"]').click();
+  await until(() => rows() > 0);
+  d.querySelector(".row[data-path]").click();
+  await until(() => disp("viewer") === "flex");
+  const handle = d.getElementById("split-handle");
+  const wBefore = w.getComputedStyle(d.documentElement).getPropertyValue("--viewer-w").trim();
+  handle.dispatchEvent(new w.MouseEvent("mousedown", { bubbles: true, clientX: 800 }));
+  w.dispatchEvent(new w.MouseEvent("mousemove", { bubbles: true, clientX: 600 }));
+  w.dispatchEvent(new w.MouseEvent("mouseup", { bubbles: true, clientX: 600 }));
+  await sleep(250);
+  const wAfter = w.getComputedStyle(d.documentElement).getPropertyValue("--viewer-w").trim();
+  check("dragging the handle resizes the viewer", wAfter !== wBefore, true);
+  note("viewer width " + wBefore + " -> " + wAfter);
+
+  // ------------------------------------------------------------- persistence
+  check("prefs written to localStorage", !!w.localStorage.getItem("repoxray.prefs.v1"), true);
+  const prefs = JSON.parse(w.localStorage.getItem("repoxray.prefs.v1") || "{}");
+  check("viewer width persisted", !!prefs.viewerWidth, true);
+  check("view persisted", !!prefs.view, true);
+
+  // ------------------------------------------------------------ help + escape
+  d.getElementById("btn-help").click();
+  check("help opens", disp("help-modal"), "flex");
+  d.getElementById("help-close").click();
+  check("got it closes help", disp("help-modal"), "none");
+  key("Escape");
+  await sleep(250);
+  check("escape closes the viewer", disp("viewer"), "none");
+
+}
+</script>
+</body></html>

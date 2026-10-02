@@ -1,0 +1,7 @@
+flask>=3.0
+requests>=2.31
+Pygments>=2.17
+Jinja2>=3.1
+
+# optional, only needed for the Claude deep-dive backend
+# anthropic>=0.40

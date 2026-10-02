@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en" data-density="compact">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RepoXray</title>
+<link rel="preload" href="/static/fonts/martian-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/fonts/fonts.css">
+<link rel="stylesheet" href="/static/pygments.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <span class="wordmark">RepoXray</span>
+    <span class="tag">source triage</span>
+  </div>
+
+  <form class="scanbar" id="scan-form" autocomplete="off">
+    <span class="scanbar-prompt">github</span>
+    <input id="url-input" name="url" spellcheck="false"
+           placeholder="owner/repo  &middot;  https://github.com/owner/repo  &middot;  .../tree/branch/sub/dir">
+    <label class="mini-check" title="Discard the cached copy and clone again">
+      <input type="checkbox" id="refresh-input"><span>re-fetch</span>
+    </label>
+    <button type="submit" id="scan-btn">analyse</button>
+  </form>
+
+  <div class="topright">
+    <span class="rule-count" id="rule-count"></span>
+    <button class="ghost" id="btn-palette" title="Jump to a file (ctrl+k)">&#8984;k</button>
+    <button class="ghost" id="btn-density" title="Toggle row density">density</button>
+    <button class="ghost" id="btn-help" title="Shortcuts and how scoring works">?</button>
+  </div>
+</header>
+
+<main class="shell" id="shell">
+  <aside class="rail">
+    <nav class="views" id="views-nav" aria-label="Organisational views"></nav>
+
+    <section class="rail-block" id="repo-block" hidden>
+      <h3>repository</h3>
+      <div id="repo-stats"></div>
+    </section>
+
+    <section class="rail-block" id="triage-block" hidden>
+      <h3>triage</h3>
+      <div id="triage-tally"></div>
+    </section>
+
+    <section class="rail-block" id="ai-block">
+      <h3>ai deep dive</h3>
+      <div class="field">
+        <label for="ai-backend">engine</label>
+        <select id="ai-backend"></select>
+      </div>
+      <div class="field">
+        <label for="ai-model">model</label>
+        <select id="ai-model"></select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="ai-topn">files</label>
+          <input type="number" id="ai-topn" value="8" min="1" max="60" step="1">
+        </div>
+        <div class="field">
+          <label for="ai-ctx">ctx</label>
+          <select id="ai-ctx">
+            <option value="4096">4k</option>
+            <option value="8192" selected>8k</option>
+            <option value="16384">16k</option>
+            <option value="32768">32k</option>
+          </select>
+        </div>
+      </div>
+      <label class="mini-check block"><input type="checkbox" id="ai-tests"><span>include tests &amp; vendored</span></label>
+      <button class="primary wide" id="btn-deepdive" disabled>read top files</button>
+      <div class="ai-status" id="ai-status">no scan loaded</div>
+    </section>
+
+    <section class="rail-block" id="history-block">
+      <h3>recent scans</h3>
+      <div id="history-list" class="history"></div>
+    </section>
+  </aside>
+
+  <section class="stage" id="stage">
+    <div class="stage-head" id="stage-head">
+      <div class="empty-hero">
+        <h2>Point it at a <em>repository</em>.</h2>
+        <p>The tree gets indexed, every readable file is matched against the sink / source /
+           entrypoint rule base, and each file lands with a risk score and the evidence behind it.
+           Then the model reads the top of that list and tells you which findings are real.</p>
+        <ul class="hero-list" id="hero-list"></ul>
+      </div>
+    </div>
+    <div class="filterbar" id="filterbar" hidden>
+      <input id="filter-text" placeholder="filter path, language, rule, reason   ( / )" spellcheck="false">
+      <div class="chips" id="band-chips"></div>
+      <span class="chip-sep"></span>
+      <div class="chips" id="tri-chips"></div>
+      <label class="mini-check"><input type="checkbox" id="hide-noise" checked><span>hide noise</span></label>
+      <label class="mini-check"><input type="checkbox" id="only-hits"><span>only hits</span></label>
+      <span class="result-count" id="result-count"></span>
+    </div>
+    <div class="view-body" id="view-body"></div>
+  </section>
+
+  <div class="split-handle" id="split-handle" hidden title="Drag to resize"></div>
+
+  <aside class="viewer" id="viewer" hidden>
+    <div class="viewer-head">
+      <div class="viewer-title">
+        <span class="vt-path" id="vt-path"></span>
+        <span class="vt-meta" id="vt-meta"></span>
+      </div>
+      <div class="viewer-actions">
+        <button class="ghost" id="btn-triage" title="Cycle triage state (t)">mark</button>
+        <button class="ghost" id="btn-copy" title="Copy this file's evidence as markdown (y)">copy</button>
+        <button class="ghost" id="btn-ai-file" title="Send just this file to the model (a)">ai read</button>
+        <a class="ghost" id="btn-gh" target="_blank" rel="noreferrer" title="Open on GitHub">github</a>
+        <button class="ghost" id="btn-close-viewer" title="Close (esc)">close</button>
+      </div>
+    </div>
+    <div class="viewer-split">
+      <div class="viewer-side" id="viewer-side"></div>
+      <div class="code-region">
+        <div class="code-wrap" id="code-wrap"><div class="code-body" id="code-body"></div></div>
+        <div class="minimap" id="minimap" title="Hit map - click to jump"></div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<div class="jobdock" id="jobdock" hidden>
+  <div class="job-head">
+    <span class="job-phase" id="job-phase">idle</span>
+    <span class="job-msg" id="job-msg"></span>
+    <button class="ghost" id="job-toggle">log</button>
+  </div>
+  <div class="job-bar"><div class="job-fill" id="job-fill"></div></div>
+  <pre class="job-log" id="job-log" hidden></pre>
+</div>
+
+<div class="palette" id="palette" hidden>
+  <div class="pal-card">
+    <div class="pal-input-wrap">
+      <span class="pal-sigil" id="pal-sigil">file</span>
+      <input id="pal-input" spellcheck="false" placeholder="jump to a file, or > for views and actions">
+      <span class="pal-hint">enter open &middot; esc close</span>
+    </div>
+    <div class="pal-list" id="pal-list"></div>
+  </div>
+</div>
+
+<div class="modal" id="help-modal" hidden>
+  <div class="modal-card">
+    <h2>How this reads a repository</h2>
+    <div class="help-grid">
+      <div>
+        <h4>scoring</h4>
+        <p>Each file is matched against sink rules (dangerous operations), source rules (places
+        untrusted input enters) and entrypoint rules (routes, handlers, CLI, jobs). A file holding
+        both a source and a sink is boosted; vendored, generated and test paths are damped. Path
+        names carry their own weight, so <code>auth/</code>, <code>admin/</code>,
+        <code>payment/</code> and <code>legacy/</code> surface earlier.</p>
+        <p>Scores saturate: 0-15 minimal, 15-35 low, 35-55 medium, 55-75 high, 75+ critical.
+        A hit is a lead, never proof &mdash; mark what you confirm, dismiss what you rule out, and
+        the report orders itself around your calls.</p>
+      </div>
+      <div>
+        <h4>shortcuts</h4>
+        <ul class="keys">
+          <li><kbd>ctrl</kbd>+<kbd>k</kbd> jump to any file</li>
+          <li><kbd>/</kbd> filter the current view</li>
+          <li><kbd>j</kbd> <kbd>k</kbd> move through rows</li>
+          <li><kbd>enter</kbd> open &middot; <kbd>esc</kbd> close</li>
+          <li><kbd>n</kbd> <kbd>p</kbd> next / previous hit</li>
+          <li><kbd>1</kbd>..<kbd>7</kbd> switch view</li>
+          <li><kbd>t</kbd> cycle triage &middot; <kbd>x</kbd> dismiss</li>
+          <li><kbd>a</kbd> ai-read the open file</li>
+          <li><kbd>y</kbd> copy evidence as markdown</li>
+          <li><kbd>r</kbd> download report</li>
+        </ul>
+      </div>
+    </div>
+    <button class="primary" id="help-close">got it</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
