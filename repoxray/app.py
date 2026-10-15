@@ -8,7 +8,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, render_template, request
 
 from . import ai as ai_mod
-from . import engine, rules, store, views
+from . import engine, rules, store, verify, views
 from .inventory import read_text
 
 app = Flask(__name__)
@@ -91,9 +91,11 @@ def index():
 def bootstrap():
     ollama_models = ai_mod.list_ollama_models()
     claude_ok, claude_note = ai_mod.AnthropicBackend().available()
+    from .analysis import run as ast_run
     return jsonify({
         "views": views.view_catalog(),
         "rules": rules.rule_count(),
+        "analysis": ast_run.capabilities(),
         "categories": {k: {"name": v["name"], "cwe": v["cwe"], "accent": v["accent"]}
                        for k, v in rules.CATEGORIES.items()},
         "history": store.list_scans(),
@@ -116,6 +118,8 @@ def api_scan():
     job = engine.start_scan(url, {
         "refresh": bool(body.get("refresh")),
         "metadata": bool(body.get("metadata", True)),
+        "deep": bool(body.get("deep", True)),
+        "cross": bool(body.get("cross", True)),
     })
     return jsonify(job.snapshot()), 202
 
@@ -244,9 +248,45 @@ def api_index(scan_id: str):
         return err
     return jsonify({"files": [
         {"p": f["path"], "s": f.get("score", 0), "b": f.get("band", "minimal"),
-         "l": f.get("lang", ""), "h": f.get("hit_count", 0), "t": f.get("triage", "")}
+         "l": f.get("lang", ""), "h": f.get("hit_count", 0), "t": f.get("triage", ""),
+         "x": f.get("cross_count", 0), "w": f.get("witness_count", 0),
+         # how many pattern matches the context pass ruled out here, so a file whose
+         # quiet score is the *result* of a decision can be told from one with nothing
+         # in it at all
+         "d": len(f.get("dismissed") or [])}
         for f in scan["files"] if f.get("kind") != "artifact"
     ]})
+
+
+@app.get("/api/scan/<scan_id>/verify")
+def api_verify(scan_id: str):
+    """A self-contained prompt for checking one file's findings in any chat model."""
+    scan, err = _scan_or_404(scan_id)
+    if err:
+        return err
+    rel = request.args.get("path", "")
+    rec = next((f for f in scan["files"] if f["path"] == rel), None)
+    if rec is None:
+        return jsonify({"error": "file not in scan", "path": rel}), 404
+    target = _safe_source_path(scan, rel)
+    if target is None:
+        return jsonify({"error": "file missing from local source copy", "path": rel}), 410
+
+    line = request.args.get("line")
+    try:
+        focus = int(line) if line else None
+    except ValueError:
+        focus = None
+
+    text, _ = read_text(target)
+    prompt = verify.build_prompt(scan, rec, text, _github_file_url(scan, rel), focus_line=focus)
+    return jsonify({
+        "path": rel,
+        "focus_line": focus,
+        "prompt": prompt,
+        "chars": len(prompt),
+        "approx_tokens": len(prompt) // 4,
+    })
 
 
 @app.get("/api/scan/<scan_id>/report.md")
@@ -301,7 +341,9 @@ def pygments_style():
 
 def _github_file_url(scan: dict, rel: str) -> str:
     repo = scan["repo"]
-    ref = repo.get("ref") or (scan.get("fetch") or {}).get("branch") or "HEAD"
+    fetch = scan.get("fetch") or {}
+    # a commit sha makes the link a permalink: the line numbers still match months later
+    ref = fetch.get("commit") or repo.get("ref") or fetch.get("branch") or "HEAD"
     sub = repo.get("subpath") or ""
     full = (sub + "/" + rel) if sub else rel
     return "https://github.com/" + repo["slug"] + "/blob/" + ref + "/" + full
@@ -321,6 +363,33 @@ def _markdown_report(scan: dict) -> str:
         "- flagged: " + str(s.get("flagged_files")) + "  |  critical " +
         str((s.get("bands") or {}).get("critical", 0)) + ", high " +
         str((s.get("bands") or {}).get("high", 0)),
+        "",
+        "## What the analysis did",
+        "",
+        "- deployment: " + ((s.get("deployment") or {}).get("describe")
+                            or "not established"),
+        "- parsed with AST + dataflow: " + str(s.get("ast_files", 0)) + " files",
+        "- verdicts: " + str(s.get("confirmed_findings", 0))
+        + " findings (source, sink and flow all established), "
+        + str(s.get("lead_findings", 0)) + " leads (a named gap), "
+        + str(s.get("pattern_hits", 0)) + " pattern matches with no traced flow, "
+        + str(s.get("signal_hits", 0)) + " annotations",
+        "- traced flows: " + str(s.get("taint_findings", 0)) + " within a file, "
+        + str(s.get("cross_findings", 0)) + " across files, "
+        + str(s.get("witness_findings", 0)) + " with a solver-generated payload",
+        "- pattern hits removed as provably wrong: "
+        + str(s.get("regex_dropped", 0) + s.get("regex_superseded", 0))
+        + "  |  paths ruled out by the solver: "
+        + str(s.get("paths_unreachable", 0) + s.get("paths_validated", 0))
+        + "  |  neutralised by a sanitizer: " + str(s.get("sanitizer_suppressed", 0))
+        + "  |  matched inside a string literal rather than in code: "
+        + str(s.get("text_not_code", 0)),
+        "- matches ruled out by the context pass: " + str(s.get("dismissed", 0))
+        + ("  (" + ", ".join(str(n) + " " + k
+                             for k, n in (s.get("dismissed_by") or {}).items()) + ")"
+           if s.get("dismissed_by") else "")
+        + ". Each one is listed with its reason on the file that holds it, so it can be "
+          "overturned.",
         "",
         "## Weakness classes seen",
         "",
@@ -354,8 +423,47 @@ def _markdown_report(scan: dict) -> str:
             lines.append("_" + "; ".join(rec["reasons"]) + "_")
         lines.append("")
         for h in rec.get("hits", [])[:10]:
-            lines.append("- `L" + str(h["line"]) + "` **" + h["title"] + "** ("
+            if h.get("tier") == "signal":
+                continue
+            tag = {"taint": " [dataflow]", "xtaint": " [cross-file]",
+                   "xentry": " [leaves this file]",
+                   "workflow": " [workflow model]"}.get(h.get("engine"), "")
+            if h.get("verdict") == "lead":
+                tag = " [LEAD]" + tag
+            elif h.get("tier") == "context":
+                tag = " [context]" + tag
+            lines.append("- `L" + str(h["line"]) + "`" + tag + " **" + h["title"] + "** ("
                          + (h["cwe"] or h["cat"]) + "): `" + h["snippet"][:160] + "`")
+            ev = h.get("evidence") or {}
+            if ev and h.get("tier") == "sink":
+                lines.append("  - established: source=" + str(ev.get("source"))
+                             + ", value=" + str(ev.get("value"))
+                             + ", sink=" + str(ev.get("sink"))
+                             + ", argument=" + str(ev.get("role") or "n/a")
+                             + ", flow=" + str(ev.get("flow"))
+                             + ", guards=" + str(ev.get("guard")))
+                for note in (ev.get("notes") or [])[:3]:
+                    lines.append("  - " + str(note))
+            cross = h.get("cross") or {}
+            if cross:
+                lines.append("  - entered at `" + str(cross.get("entry_path")) + ":"
+                             + str(cross.get("entry_line")) + "` as argument "
+                             + str(cross.get("arg")) + " of `" + str(cross.get("function"))
+                             + "()`" + (" (" + str(cross.get("entry_count"))
+                                        + " call sites)" if cross.get("entry_count", 0) > 1
+                                        else "")
+                             + "; link resolved by " + str(cross.get("link")))
+            if h.get("witness"):
+                lines.append("  - a value that passes every check on the path: `"
+                             + str(h["witness"]) + "`")
+            for guard in (h.get("guards") or [])[:4]:
+                lines.append("  - " + str(guard))
+        annotations = [h for h in rec.get("hits", []) if h.get("tier") == "signal"]
+        if annotations:
+            lines.append("")
+            lines.append("_annotations (not findings): "
+                         + "; ".join("L" + str(h["line"]) + " " + h["title"]
+                                     for h in annotations[:6]) + "_")
         ai = rec.get("ai")
         if ai and not ai.get("error"):
             lines += ["", "**AI verdict** " + str(ai.get("probability")) + "% ("

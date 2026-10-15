@@ -186,6 +186,251 @@ async function run() {
   await until(() => d.querySelectorAll(".hs-row").length > 0);
   check("command switched the view", d.querySelectorAll(".hs-row").length > 0, true);
 
+  // ------------------------------------------------------------ dataflow layer
+  const boot = await w.fetch("/api/bootstrap").then((r) => r.json());
+  check("dataflow capability advertised", !!boot.analysis, true);
+  check("python has a parser", boot.analysis.python && boot.analysis.python.parser, true);
+  check("typescript modelled in full", boot.analysis.typescript.depth, "full");
+  check("deep toggle present and on", d.getElementById("deep-input").checked, true);
+
+  const sid = w.location.hash.replace(/^#/, "").split("/")[0];
+  const tf = await w.fetch("/api/scan/" + sid
+    + "/file?path=" + encodeURIComponent("routes/userProfile.ts")).then((r) => r.json());
+  const taint = (tf.hits || []).filter((h) => h.engine === "taint");
+  check("dataflow findings present on a known vulnerable file", taint.length > 0, true);
+  if (taint.length) {
+    check("finding carries a trace", (taint[0].trace || []).length > 1, true);
+    check("finding names its source", !!taint[0].source, true);
+    check("finding has a confidence", ["high", "medium", "low"].includes(taint[0].confidence), true);
+    note("traced: " + taint[0].source + " -> L" + taint[0].line
+         + " (" + taint[0].trace.length + " hops)");
+  }
+  check("file reports which engine ran", (tf.record.analysis || {}).engine, "ast+taint");
+
+  // The viewer should render the trace. Wait for the title to be the file we asked for:
+  // waiting only for ".vs-taint" passes instantly against whatever file was already open,
+  // which silently moved these checks onto the wrong file.
+  const openAt = async (p) => {
+    w.location.hash = sid + "/" + p;
+    await until(() => d.getElementById("vt-path").textContent === p, 9000, "viewer on " + p);
+  };
+  await openAt("routes/userProfile.ts");
+  await until(() => d.querySelector(".vs-taint"), 9000, "a dataflow finding in the viewer");
+  check("viewer marks dataflow findings", !!d.querySelector(".vs-taint"), true);
+  check("viewer renders trace steps", d.querySelectorAll(".tstep").length > 1, true);
+  check("viewer shows a confidence badge", !!d.querySelector(".ebadge"), true);
+
+  // -------------------------------------------- path conditions and the solver
+  const solver = boot.analysis._solver || {};
+  check("solver capability advertised", typeof solver.available, "boolean");
+  if (solver.available) {
+    check("solver reports a version", /^\d/.test(String(solver.version)), true);
+    check("solver models the command class", (solver.classes || []).includes("cmd"), true);
+    note("z3 " + solver.version + ", payload models: " + (solver.classes || []).length);
+  } else {
+    note("z3 is not installed; path conditions are off and findings keep their guards");
+  }
+  const xcap = boot.analysis._cross_file || {};
+  check("cross-file capability advertised", !!xcap.available, true);
+  check("cross-file toggle present and on", d.getElementById("cross-input").checked, true);
+  check("capability line mentions the solver",
+        /solver:/.test(d.getElementById("rule-count").textContent), true);
+  check("capability line mentions cross-file",
+        /cross-file:/.test(d.getElementById("rule-count").textContent), true);
+
+  const sum = (await w.fetch("/api/scan/" + sid).then((r) => r.json())).summary || {};
+  check("summary counts solver queries", typeof sum.solver_queries, "number");
+  check("summary counts cross-file findings", typeof sum.cross_findings, "number");
+  check("summary records the cross-file pass", !!sum.cross, true);
+  note("scan summary: " + sum.taint_findings + " dataflow, " + sum.cross_findings
+       + " cross-file, " + sum.witness_findings + " with a witness, "
+       + sum.solver_queries + " solver queries in " + sum.solver_ms + "ms");
+
+  // a file whose guards the solver read should expose them on the finding
+  const guarded = (tf.hits || []).filter((h) => (h.guards || []).length);
+  note("guards rendered on " + guarded.length + " finding(s) of this file");
+  if (guarded.length) {
+    await openAt("routes/userProfile.ts");
+    await until(() => d.querySelector(".vs-hit"), 9000, "findings in the viewer");
+    check("viewer renders path conditions", !!d.querySelector(".gcond"), true);
+    check("every collected condition is shown",
+          d.querySelectorAll(".gcond").length >= guarded[0].guards.length, true);
+  }
+
+  // ------------------------------------------------- verdicts, evidence, signals
+  check("summary separates findings from leads", typeof sum.confirmed_findings, "number");
+  check("summary counts pattern matches apart", typeof sum.pattern_hits, "number");
+  check("summary counts annotations apart", typeof sum.signal_hits, "number");
+  note("verdicts: " + sum.confirmed_findings + " findings, " + sum.lead_findings
+       + " leads, " + sum.pattern_hits + " pattern matches, " + sum.signal_hits
+       + " annotations, " + sum.regex_demoted + " demoted by the dataflow pass");
+
+  const flowHits = (tf.hits || []).filter((h) => h.engine === "taint");
+  if (flowHits.length) {
+    const ev = flowHits[0].evidence || {};
+    check("a flow finding carries itemised evidence", !!ev.source && !!ev.value, true);
+    check("evidence names a verdict", ["finding", "lead"].includes(ev.verdict), true);
+    note("evidence: source=" + ev.source + " value=" + ev.value + " flow=" + ev.flow
+         + " guard=" + ev.guard + " -> " + ev.verdict);
+  }
+  // an annotation must never carry a CWE or a weight
+  const annotations = (tf.hits || []).filter((h) => h.tier === "signal");
+  for (const a of annotations.slice(0, 3)) {
+    check("annotation " + a.rule + " carries no CWE", a.cwe || "", "");
+  }
+  if (annotations.length) note(annotations.length + " annotation(s) on this file");
+
+  await openAt("routes/userProfile.ts");
+  await until(() => d.querySelector(".vs-hit"), 9000, "findings in the viewer");
+  check("viewer renders the evidence grid", !!d.querySelector(".evid .ecell"), true);
+  check("viewer labels a verdict", !!d.querySelector(".vbadge"), true);
+  const buckets = [...d.querySelectorAll(".vs-block h4")].map((h) => h.textContent.trim());
+  check("viewer separates the buckets", buckets.length > 1, true);
+  note("buckets: " + buckets.map((b) => b.split("(")[0].trim()).join(" | "));
+
+  // ----------------------------------------- the context pass and what it ruled out
+  // A scan saved before the context pass existed has none of these fields, and failing
+  // on old data on disk would be a false alarm about the code. Say so and move on.
+  const hasCtx = typeof sum.dismissed === "number";
+  if (!hasCtx) {
+    note("this scan predates the context pass; rescan to exercise it "
+         + "(no `dismissed` in its summary)");
+  } else {
+    check("summary counts ruled-out matches", typeof sum.dismissed, "number");
+    check("summary records the deployment type",
+          typeof ((sum.deployment || {}).kind), "string");
+    note("deployment: " + ((sum.deployment || {}).describe || "(none)")
+         + " | ruled out: " + sum.dismissed
+         + (sum.dismissed_by ? " (" + Object.entries(sum.dismissed_by)
+            .map(([k, n]) => n + " " + k).join(", ") + ")" : ""));
+  }
+
+  // Find a file the context pass acted on and prove the reason reaches both the viewer
+  // and the verify prompt. A dismissal the user cannot read is a silent drop.
+  const allFiles = hasCtx ? ((await w.fetch("/api/scan/" + sid + "/index")
+    .then((r) => r.json())).files || []) : [];
+  const ruledRow = allFiles.filter((f) => f.d > 0).sort((a, b) => b.d - a.d)[0];
+  let ruledFile = null;
+  if (ruledRow) {
+    ruledFile = await w.fetch("/api/scan/" + sid + "/file?path="
+      + encodeURIComponent(ruledRow.p)).then((r) => r.json());
+  }
+  // the file endpoint wraps the scan record one level down
+  const ruledRec = (ruledFile || {}).record || {};
+  if (!(ruledRec.dismissed || []).length) {
+    note("no ruled-out matches in this scan; the context pass had nothing to do here");
+  } else {
+    const item = ruledRec.dismissed[0];
+    check("a ruled-out match keeps its line", typeof item.line, "number");
+    check("a ruled-out match names a reason kind", !!item.kind, true);
+    check("a ruled-out match explains itself in words", item.why.length > 40, true);
+    note("ruled out in " + ruledRow.p + ": " + item.rule + " L" + item.line
+         + " [" + item.kind + "]");
+    await openAt(ruledRow.p);
+    await until(() => d.querySelector(".vs-dismissed"), 9000, "the ruled-out block");
+    check("viewer shows the ruled-out block", !!d.querySelector(".vs-dismissed"), true);
+    check("viewer prints the reason", (d.querySelector(".ruled-why") || {}).textContent
+          ? d.querySelector(".ruled-why").textContent.length > 40 : false, true);
+    check("viewer strikes through the rule that was ruled out",
+          !!d.querySelector(".ruled-rule"), true);
+    const vp = await w.fetch("/api/scan/" + sid + "/verify?path="
+                             + encodeURIComponent(ruledRow.p))
+      .then((r) => r.json());
+    check("verify prompt lists what was ruled out",
+          (vp.prompt || "").includes("ruled out"), true);
+    check("verify prompt invites disagreement",
+          (vp.prompt || "").includes("so you can disagree"), true);
+  }
+
+  // ------------------------------------- the identity layer, end to end in the UI
+  // `exec` is not always child_process.exec. When a scan carries that verdict, the
+  // definition the resolver read has to reach the page: a dismissal whose reason is
+  // "trust me" is the thing this layer was built to stop being.
+  if (hasCtx) {
+    const kinds = sum.dismissed_by || {};
+    if (!kinds["wrong-function"]) {
+      note("no name-resolution verdicts in this scan; nothing to render");
+    } else {
+      note("name resolved to a different function " + kinds["wrong-function"] + "x");
+      let found = null;
+      for (const row of allFiles.filter((f) => f.d > 0).sort((a, b) => b.d - a.d)
+        .slice(0, 12)) {
+        const rec = ((await w.fetch("/api/scan/" + sid + "/file?path="
+          + encodeURIComponent(row.p)).then((r) => r.json())) || {}).record || {};
+        const hitItem = (rec.dismissed || []).find((x) => x.kind === "wrong-function");
+        if (hitItem) { found = { path: row.p, item: hitItem }; break; }
+      }
+      check("a wrong-function verdict is on a file", !!found, true);
+      if (found) {
+        check("  ... and quotes the definition it read",
+              /\bis\b/.test(found.item.why) && found.item.why.length > 40, true);
+        note("wrong function in " + found.path + ": " + found.item.why.slice(0, 120));
+      }
+    }
+    check("the report counts matches that were text, not code",
+          typeof sum.text_not_code, "number");
+  }
+
+  // ------------------------------------------------------- cross-file findings
+  // Only some repositories have a flow that leaves a file, so this runs against whichever
+  // scan in history has one and reports plainly when none does.
+  const hist = (await w.fetch("/api/history").then((r) => r.json())).history || [];
+  let xscan = null;
+  for (const row of hist.slice(0, 12)) {
+    const head = await w.fetch("/api/scan/" + row.id).then((r) => r.json());
+    if ((head.summary || {}).cross_findings > 0) { xscan = head; break; }
+  }
+  if (!xscan) {
+    note("no scan in history has a cross-file finding; rendering not exercised");
+  } else {
+    const idx = await w.fetch("/api/scan/" + xscan.id + "/index").then((r) => r.json());
+    const target = (idx.files || []).find((f) => f.x > 0);
+    check("a file carries the cross-file count", !!target, true);
+    const tpath = target ? target.p : null;
+    if (!tpath) {
+      note("index has no cross-file column; skipping the rendering checks");
+    } else {
+      w.location.hash = xscan.id + "/" + tpath;
+      await until(() => d.getElementById("vt-path").textContent === tpath, 12000,
+                  "viewer on " + tpath);
+      await until(() => d.querySelector(".vs-cross"), 9000, "a cross-file finding");
+      check("viewer marks cross-file findings", !!d.querySelector(".vs-cross"), true);
+      check("cross-file badge rendered", !!d.querySelector(".ebadge.xfile"), true);
+      check("trace names the other file", !!d.querySelector(".thop"), true);
+      // one of the entry points can be this very file; pick one that is not
+      const before = d.getElementById("vt-path").textContent;
+      const entry = [...d.querySelectorAll(".xentry")].find(
+        (el) => (el.dataset.open || "").split("#")[0] !== before);
+      if (entry) {
+        entry.click();
+        const moved = await until(
+          () => d.getElementById("vt-path").textContent !== before, 9000, "the entry file");
+        check("clicking an entry opens the calling file", !!moved, true);
+        note("followed the flow to " + d.getElementById("vt-path").textContent);
+      }
+      note("cross-file example: " + xscan.repo.slug + " " + tpath
+           + " (" + target.x + " cross-file finding(s))");
+    }
+  }
+
+  // ------------------------------------------------------- verification prompt
+  d.querySelector('.view-item[data-view="risk"]').click();
+  await until(() => rows() > 0);
+  d.querySelector(".row[data-path]").click();
+  await until(() => disp("viewer") === "flex");
+  const vpath = d.getElementById("vt-path").textContent;
+  check("verify button present", !!d.getElementById("btn-verify"), true);
+  const vr = await w.fetch("/api/scan/" + w.location.hash.replace(/^#/, "").split("/")[0]
+    + "/verify?path=" + encodeURIComponent(vpath)).then((r) => r.json());
+  check("verify endpoint returns a prompt", vr.prompt && vr.prompt.length > 500, true);
+  for (const section of ["## Target", "## What the scanner flagged", "## Source",
+                         "TRUE POSITIVE", "NEED MORE CONTEXT"]) {
+    check("prompt contains " + JSON.stringify(section), vr.prompt.includes(section), true);
+  }
+  check("prompt pins the commit", /blob\/[0-9a-f]{7,}\//.test(vr.prompt), true);
+  check("prompt reports a token estimate", vr.approx_tokens > 100, true);
+  note("prompt for " + vpath + ": ~" + vr.approx_tokens + " tokens");
+
   // ---------------------------------------------------------- density + split
   const rowPadBefore = w.getComputedStyle(d.documentElement).getPropertyValue("--row-pad").trim();
   d.getElementById("btn-density").click();

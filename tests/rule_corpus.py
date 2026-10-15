@@ -169,6 +169,60 @@ CASES: list[tuple] = [
     ("js", "path join from params", "javascript",
      "const p = path.join(__dirname, 'up', req.params.file)", ["js.path_req"], []),
     ("js", "vm sandbox", "javascript", "vm.runInNewContext(userCode, {})", ["js.vm"], []),
+
+    # ------------------------------------------------- prose is not code (comment stripping)
+    ("noise", "c doc comment mentioning dangerous calls", "cpp", """
+      /**
+       * @param n the index to a converter available on the system (0..ucnv_countAvailable()-1)
+       * Note: you cannot use execvp() here, and strcpy() would be unsafe.
+       */
+      int n = 0;
+    """, [], ["c.system", "c.unsafe_str"]),
+
+    ("noise", "c comment does not hide the real sink", "cpp", """
+      /* run the command */
+      return system(cmd);
+    """, ["c.system"], []),
+
+    ("noise", "js comment mentioning eval", "javascript", """
+      // TODO: eval(userInput) was removed in 2019
+      const safe = JSON.parse(raw)
+    """, [], ["js.eval"]),
+
+    ("noise", "python comment mentioning subprocess", "python", """
+      # we deliberately do not use subprocess.run(cmd) here
+      data = json.loads(raw)
+    """, [], ["py.subprocess_var"]),
+
+    ("noise", "importing child_process is not execution", "javascript", """
+      const child_process = require('child_process')
+      const { execFile } = require('child_process')
+    """, [], ["js.child_exec"]),
+
+    ("noise", "a url containing // is not a comment", "javascript", """
+      const endpoint = "https://api.example.com//v2/users"
+      eval(payload)
+    """, ["js.eval"], []),
+
+    ("noise", "shell parameter expansion is not a comment", "shell", """
+      if [ $# -gt 0 ]; then
+        rm -rf $TARGET
+      fi
+    """, ["sh.var_cmd"], []),
+
+    ("noise", "hash inside a string is not a comment", "python", """
+      banner = "#!/bin/sh"
+      os.system(cmd)
+    """, ["py.os_system"], []),
+
+    ("noise", "security TODO is still read from comments", "javascript", """
+      // TODO: fix this auth bypass before release
+      const x = 1
+    """, ["gen.security_todo"], []),
+
+    ("noise", "suppressed linter warning still read", "python", """
+      subprocess.call(cmd, shell=True)  # nosec
+    """, ["gen.suppressed"], []),
 ]
 
 
@@ -185,7 +239,10 @@ def run(section_filter: str | None = None) -> int:
             "lang": lang, "kind": "code", "lines": code.count("\n") + 1, "size": len(code),
             "is_test": False, "is_vendored": False, "is_generated": False,
         }
-        analyse_file(rec, code)
+        # deep=False: this corpus pins the PATTERN layer. Where dataflow has a verdict it
+        # replaces the pattern hit, which is correct but would make these cases meaningless.
+        # The dataflow layer has its own corpus in tests/taint_corpus.py.
+        analyse_file(rec, code, deep=False)
         fired = {h["rule"] for h in rec["hits"]}
         missing = [r for r in want_hit if r not in fired]
         spurious = [r for r in want_miss if r in fired]

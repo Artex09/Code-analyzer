@@ -144,6 +144,30 @@ def read_text(path: Path) -> tuple[str, bool]:
     return raw.decode("utf-8", "replace"), truncated
 
 
+def _keep_rank(item) -> tuple:
+    """Which files survive the file cap, best first.
+
+    Only consulted when a repository is over the cap. Extension and path only - no stat, no
+    read - so ranking 150,000 paths costs nothing.
+    """
+    rel, _rel_path, path = item
+    lang = _language(path)
+    lowered = "/" + rel.lower()
+    if lang == "binary":
+        tier = 5
+    elif VENDOR_RE.search(lowered):
+        tier = 4
+    elif TEST_RE.search(lowered):
+        tier = 3
+    elif GENERATED_RE.search(lowered):
+        tier = 2
+    elif lang in DOC_LANGS or lang == "unknown":
+        tier = 1
+    else:
+        tier = 0
+    return (tier, rel.count("/"), rel)
+
+
 def build_inventory(root: Path, log=lambda m: None, progress=None) -> dict:
     """Classify every file under root. Returns {files, dirs, skipped, totals}."""
     files: list[dict] = []
@@ -151,24 +175,33 @@ def build_inventory(root: Path, log=lambda m: None, progress=None) -> dict:
     skipped = {"dirs": 0, "binary": 0, "too_many": 0}
     seen = 0
 
+    candidates: list = []
     for path in sorted(root.rglob("*")):
         try:
             rel_path = path.relative_to(root)
         except ValueError:
             continue
-        rel = rel_path.as_posix()
         parts = rel_path.parts
-
         if any(p in SKIP_DIRS for p in parts[:-1]) or (path.is_dir() and path.name in SKIP_DIRS):
             if path.is_dir():
                 skipped["dirs"] += 1
             continue
         if path.is_dir():
             continue
-        if len(files) >= MAX_FILES:
-            skipped["too_many"] += 1
-            continue
+        candidates.append((rel_path.as_posix(), rel_path, path))
 
+    if len(candidates) > MAX_FILES:
+        # The cap used to bite in alphabetical order. On nodejs/node that meant 20,000 files
+        # of deps/v8 tests and not a single line of lib/ - the scan looked complete and had
+        # never seen the project's own code. Keep what is most likely to be it.
+        candidates.sort(key=_keep_rank)
+        skipped["too_many"] = len(candidates) - MAX_FILES
+        del candidates[MAX_FILES:]
+        candidates.sort(key=lambda item: item[0])
+        log("over " + str(MAX_FILES) + " files: kept the project's own source and dropped "
+            + str(skipped["too_many"]) + " vendored, test and binary paths first")
+
+    for rel, rel_path, path in candidates:
         seen += 1
         if progress and seen % 400 == 0:
             progress(seen)

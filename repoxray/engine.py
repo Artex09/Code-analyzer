@@ -116,8 +116,16 @@ def _run_scan(job: Job, url: str, options: dict) -> None:
             job.say("scored " + str(i) + "/" + str(total), "score",
                     46 + int(48 * (i / max(1, total))))
 
+        deep = bool(options.get("deep", True))
+        cross = bool(options.get("cross", True)) and deep
+        if deep:
+            job.say("AST + dataflow + path conditions enabled (slower, far fewer false "
+                    "positives)", "score", 46)
+        if cross:
+            job.say("cross-file flow enabled: summaries are resolved between modules",
+                    "score", 46)
         analysis = score_repo(root, inv, log=lambda m: job.say(m, "score", 92),
-                              progress=score_progress)
+                              progress=score_progress, deep=deep, cross=cross)
 
         scan = {
             "id": store.new_scan_id(spec.slug),

@@ -16,6 +16,13 @@ CATEGORIES = {
     "sqli":     {"name": "SQL Injection",              "cwe": "CWE-89",   "accent": "#ff9500"},
     "nosql":    {"name": "NoSQL / Query Injection",    "cwe": "CWE-943",  "accent": "#ffb454"},
     "deser":    {"name": "Insecure Deserialization",   "cwe": "CWE-502",  "accent": "#ff4d8d"},
+    # Decoding is not deserialization. `yaml.Unmarshal` in Go fills a struct and cannot
+    # construct arbitrary types; `pickle.loads` runs code by design. Calling both CWE-502
+    # claims remote code execution where the library offers no such thing, so the decoders
+    # that cannot execute code get their own class and their own honest CWE: the risk is a
+    # decompression/recursion bomb and type confusion, not RCE. See DESER_POWER.
+    "decode":   {"name": "Untrusted Decode (no code execution)", "cwe": "CWE-409",
+                 "accent": "#ffa8c8"},
     "path":     {"name": "Path Traversal / File Access", "cwe": "CWE-22", "accent": "#d68cff"},
     "upload":   {"name": "Unrestricted Upload",        "cwe": "CWE-434",  "accent": "#b07cff"},
     "ssrf":     {"name": "SSRF / Outbound Fetch",      "cwe": "CWE-918",  "accent": "#5ac8fa"},
@@ -33,11 +40,22 @@ CATEGORIES = {
     "csrf":     {"name": "CSRF Protection Disabled",   "cwe": "CWE-352",  "accent": "#c3a6ff"},
     "proto":    {"name": "Mass Assignment / Prototype", "cwe": "CWE-1321", "accent": "#f7a1c4"},
     "memory":   {"name": "Memory Safety",              "cwe": "CWE-787",  "accent": "#ff6b6b"},
+    # A format string under attacker control is its own weakness with its own CWE. Filing
+    # it under memory safety printed CWE-787 (out-of-bounds write) on a `fprintf` whose
+    # format string was a literal - the wrong number beside the wrong claim.
+    "format":   {"name": "Format String",              "cwe": "CWE-134",  "accent": "#ff8c69"},
     "race":     {"name": "Race Condition / TOCTOU",    "cwe": "CWE-367",  "accent": "#a8dadc"},
     "dos":      {"name": "DoS / Resource Exhaustion",  "cwe": "CWE-400",  "accent": "#adb5bd"},
     "config":   {"name": "Dangerous Configuration",    "cwe": "CWE-489",  "accent": "#ced4da"},
     "supply":   {"name": "Supply Chain / CI",          "cwe": "CWE-1357", "accent": "#e07a5f"},
-    "suppress": {"name": "Suppressed Warning / TODO",  "cwe": "CWE-1078", "accent": "#bfa66b"},
+    # Not a weakness. `#nosec` is a developer telling a linter to be quiet; it is worth
+    # reading next to a finding, and it is not itself a vulnerability, so it carries no CWE
+    # and no score. See SIGNAL_CATS.
+    "suppress": {"name": "Security Signal (not a finding)", "cwe": "", "accent": "#bfa66b"},
+    "argv": {"name": "Argument Injection", "cwe": "CWE-88", "accent": "#d08a5a"},
+    # Secrets are their own security model. The risk is not `secret -> sink`, it is
+    # `secret -> somewhere readable`, and that is a different question with a different fix.
+    "disclosure": {"name": "Credential Disclosure", "cwe": "CWE-532", "accent": "#c98fd0"},
 }
 
 PY = ("python",)
@@ -188,7 +206,7 @@ RULES: list[tuple] = [
     # `exec(` bare is the destructured child_process import; `x.exec(` is RegExp.prototype.exec,
     # which is far more common in JS and must not read as command execution.
     ("js.child_exec", "cmd", "child_process exec", 8, JS,
-     r"(?<![\w$.])exec(?:Sync)?\s*\(|\b(?:child_process|childProcess|cp)\s*\.\s*exec(?:Sync|File|FileSync)?\s*\(|require\s*\(\s*['\"]child_process", False,
+     r"(?<![\w$.])exec(?:Sync)?\s*\(|\b(?:child_process|childProcess|cp)\s*\.\s*exec(?:Sync|File|FileSync)?\s*\(", False,
      "exec spawns a shell; template literals make injection trivial."),
     ("js.spawn_shell", "cmd", "spawn with shell:true", 8, JS,
      r"(?:spawn|execFile)(?:Sync)?\s*\((?:[^)]|\n)*?shell\s*:\s*true", False,
@@ -252,9 +270,18 @@ RULES: list[tuple] = [
     ("js.deser", "deser", "unsafe object deserialisation", 8, JS,
      r"node-serialize|serialize-javascript|funcster|\bunserialize\s*\(|eval\s*\(\s*JSON", False,
      "These libraries reconstruct functions from data."),
-    ("js.yaml_load", "deser", "yaml.load (non-safe)", 6, JS,
+    # js-yaml 4 made `load` the safe loader; the dangerous one is gone from the API. Only
+    # an explicit full schema, or js-yaml 3 pinned in package.json, can build functions.
+    ("js.yaml_load", "decode", "js-yaml load", 3, JS,
      r"yaml\.load\s*\((?![^)]*(?:safe|JSON_SCHEMA|CORE_SCHEMA))", False,
-     "Legacy js-yaml load can instantiate custom types."),
+     "In js-yaml 4 `load` is the safe loader and cannot instantiate custom types, so this "
+     "is a decode rather than a deserialisation flaw. Check package.json: on js-yaml 3 "
+     "`load` used the full schema and could build functions."),
+    ("js.yaml_full", "deser", "js-yaml full schema", 8, JS,
+     r"(?:DEFAULT_FULL_SCHEMA|FULL_SCHEMA|!!js/function|!!js/eval|"
+     r"yaml\.load\s*\([^)]*\btypes\s*:)", False,
+     "The full schema constructs JavaScript functions from the document, which is code "
+     "execution."),
     # a bare `.set(` is any setter (Angular signals, Maps); require the lodash/merge idiom
     ("js.proto_pollute", "proto", "deep merge / dynamic key write", 6, JS,
      r"(?:\b_|lodash)\s*\.\s*(?:merge|mergeWith|defaultsDeep|setWith|zipObjectDeep|set)\s*\(|\b(?:merge|mergeWith|defaultsDeep|deepExtend|deepmerge|extend)\s*\(\s*(?:\{\}|target|dest|options|config|defaults)\b|Object\.assign\s*\(\s*(?:\{\}|\w+)\s*,\s*req\.", False,
@@ -396,9 +423,14 @@ RULES: list[tuple] = [
     ("go.path", "path", "file op with request value", 7, GO,
      r"(?:os\.(?:Open|OpenFile|ReadFile|Create|Remove|RemoveAll)|ioutil\.ReadFile|filepath\.Join|http\.ServeFile)\s*\((?:[^)]|\n){0,80}(?:r\.URL|mux\.Vars|c\.Param|vars\[|r\.FormValue)", False,
      "Traversal candidate in a handler."),
-    ("go.ssrf", "ssrf", "HTTP request to computed URL", 6, GO,
-     r"http\.(?:Get|Post|Head|PostForm|NewRequest(?:WithContext)?)\s*\((?:[^)]|\n){0,60}(?:fmt\.Sprintf|[a-z]\w*Url|url\b|r\.FormValue)", False,
-     "Dynamic outbound target."),
+    # `url\b` matched any variable called url, which is how a metadata probe reading
+    # r.cfg.MetadataServiceURL was reported as SSRF. A name is not provenance: the request
+    # target has to be shown to come from somewhere, which is the dataflow pass's job.
+    ("go.ssrf", "ssrf", "HTTP request to a computed URL", 4, GO,
+     r"http\.(?:Get|Post|Head|PostForm|NewRequest(?:WithContext)?)\s*\((?:[^)]|\n){0,60}"
+     r"(?:r\.FormValue|r\.URL\.Query|mux\.Vars|c\.Param|c\.Query)", False,
+     "The outbound target is built from request data. Where the dataflow pass runs, it "
+     "decides this; this pattern only notes that the file makes outbound requests."),
     ("go.tls_off", "tls", "InsecureSkipVerify", 8, GO, r"InsecureSkipVerify\s*:\s*true", False,
      "TLS certificate check disabled."),
     ("go.template_raw", "xss", "template.HTML / text/template for HTML", 6, GO,
@@ -407,9 +439,15 @@ RULES: list[tuple] = [
     ("go.crypto", "crypto", "math/rand or weak hash", 5, GO,
      r"\"math/rand\"|md5\.(?:New|Sum)|sha1\.(?:New|Sum)|des\.NewCipher|rc4\.NewCipher", False,
      "Predictable randomness or broken hash."),
-    ("go.deser", "deser", "gob / yaml decode", 5, GO,
+    # Go's yaml, gob and xml decoders fill a typed struct. There is no constructor tag, no
+    # object graph, no code execution - so this is not CWE-502. What is left is real but
+    # much smaller: a deeply nested or highly compressed document can exhaust memory, and
+    # an unexpected type can confuse the consumer.
+    ("go.deser", "decode", "gob / yaml / xml decode into a struct", 3, GO,
      r"gob\.NewDecoder|yaml\.Unmarshal|xml\.Unmarshal", False,
-     "Structured decode of untrusted bytes."),
+     "Decodes bytes into a typed struct. These decoders cannot construct arbitrary types, "
+     "so this is not remote code execution; the question is whether the input is size- "
+     "and depth-limited, and whether the decoded values are validated."),
     ("go.cors", "cors", "permissive CORS", 6, GO,
      r"AllowAllOrigins\s*:\s*true|Access-Control-Allow-Origin\"\s*,\s*\"\*|AllowOrigins\s*:\s*\[\]string\{\s*\"\*\"", False,
      "Any origin allowed."),
@@ -451,9 +489,21 @@ RULES: list[tuple] = [
     ("c.mem_ops", "memory", "memcpy / alloca / realloc", 5, CFAM,
      r"\b(?:memcpy|memmove|alloca|realloc|strncpy|snprintf)\s*\(", False,
      "Length arithmetic worth auditing for overflow."),
-    ("c.format", "memory", "non-literal format string", 7, CFAM,
-     r"\b(?:printf|fprintf|sprintf|syslog)\s*\(\s*(?:[a-z_]\w*\s*[,)])", False,
-     "Format-string vulnerability."),
+    # The format string is not always the first argument, and the old pattern did not
+    # know that. `std::fprintf(stderr, "cleanup failed (Win32 %lu)", code)` matched on
+    # `stderr` - the stream - and reported a format-string bug on a file whose five
+    # format strings are all literals. fprintf/sprintf/syslog take the format second,
+    # snprintf third, printf first; each position gets its own alternative, and a quoted
+    # literal cannot match the identifier pattern that stands in the format slot.
+    ("c.format", "format", "format string from a variable", 6, CFAM,
+     r"\b(?:v?printf|v?wprintf)\s*\(\s*[A-Za-z_][\w:.]*(?:\s*(?:->|\.)\s*\w+|\[[^\]\n]*\])*"
+     r"\s*[,)]|"
+     r"\b(?:v?fprintf|v?sprintf|v?fwprintf|syslog|asprintf|dprintf)\s*\([^,()\"\n]{1,80},"
+     r"\s*[A-Za-z_][\w:.]*(?:\s*(?:->|\.)\s*\w+|\[[^\]\n]*\])*\s*[,)]|"
+     r"\b(?:v?snprintf|v?swprintf)\s*\([^,()\"\n]{1,80},[^,()\"\n]{1,40},"
+     r"\s*[A-Za-z_][\w:.]*(?:\s*(?:->|\.)\s*\w+|\[[^\]\n]*\])*\s*[,)]", False,
+     "A format string the caller supplies lets %n write to memory and %s read it. "
+     "Only a non-literal format argument can do that."),
     ("c.system", "cmd", "system / popen / exec*", 8, CFAM,
      r"\b(?:system|popen|execl|execlp|execvp|execve)\s*\(", False,
      "Command execution."),
@@ -554,6 +604,15 @@ RULES: list[tuple] = [
 ]
 
 # --------------------------------------------------- untrusted input sources
+#
+# (id, langs, pattern, corroborating pattern)
+#
+# The fourth element has to match somewhere in the same file for the source to count. It
+# exists because of a real false positive: `src.graphql` was written as
+# `(?:resolve\s*[:(]|Resolver|@Mutation|@Query)\s*[\(\{]` with no language restriction, and
+# matched `NewBasicResolver(` in a Go gRPC SDK - so a connection-string parser was reported
+# as "reads untrusted input: graphql", in a repository with no GraphQL anywhere. A framework
+# source is only a source if the framework is present.
 
 SOURCES: list[tuple] = [
     ("src.py.flask", PY, r"request\.(?:args|form|json|data|files|values|cookies|headers|get_json)"),
@@ -570,8 +629,19 @@ SOURCES: list[tuple] = [
     ("src.ruby", RB, r"\bparams\[|request\.(?:body|headers|env|query_parameters)|cookies\["),
     ("src.cs", CS, r"Request\.(?:Query|Form|Body|Headers|Cookies|QueryString|Params)|\[FromQuery\]|\[FromBody\]"),
     ("src.c", CFAM, r"(?:argv\[|getenv\s*\(|recv\s*\(|read\s*\(\s*0|fgets\s*\(\s*\w+\s*,\s*\w+\s*,\s*stdin)"),
-    ("src.graphql", (), r"(?:resolve\s*[:(]|Resolver|@Mutation|@Query)\s*[\(\{]"),
-    ("src.webhook", (), r"(?:webhook|callback_url|X-Hub-Signature|stripe-signature|X-Signature)"),
+    # `Resolver` is a gRPC name resolver in Go, a DNS resolver in Node and a GraphQL
+    # resolver only where GraphQL is imported, so the import is required.
+    ("src.graphql", JS + PY + JAVA + PHP + RB + CS,
+     r"(?:@(?:Mutation|Query|Resolver|FieldResolver)\s*\(|"
+     r"\bresolvers?\s*[:=]\s*\{|\bRootValue\b|parent,\s*args,\s*context)",
+     r"graphql|apollo|type-graphql|nexus|strawberry|graphene|gqlgen|"
+     r"\bgql\s*`|buildSchema|makeExecutableSchema"),
+    # the bare word "webhook" appears in comments, route names and docs; a webhook is a
+    # source when a handler reads the request that carries it
+    ("src.webhook", (),
+     r"(?:X-Hub-Signature|stripe-signature|X-Signature-256|X-Gitlab-Token|"
+     r"X-Slack-Signature|svix-signature)",
+     r""),
 ]
 
 # --------------------------------------------------------------- entrypoints
@@ -632,6 +702,124 @@ NEGATIVE_PATH_SIGNALS: list[tuple] = [
 ]
 
 
+# Rules that describe what a file DOES rather than what is wrong with it. "This C file calls
+# memcpy" is true of every C file; it is a reason to look, not an alert. They are scored lower
+# when nothing untrusted reaches the file, and the UI lists them apart from real findings.
+CONTEXT_RULES = {
+    "c.mem_ops", "c.alloc_math", "c.tmp", "py.open_var", "py.weak_random", "py.mktemp",
+    "py.subprocess_var", "py.xml", "py.authz_marker", "js.fs_var", "js.math_random",
+    "js.jquery_sink", "js.regex_dyn", "java.ssrf", "java.authz", "go.deser", "cs.authz",
+    "cfg.ci_secret_echo", "cfg.debug", "cfg.install_hook", "sh.var_cmd", "php.weak_hash",
+    "gen.trust_comment", "rb.send_file",
+}
+
+
+# Categories that are observations about the code, not claims about a vulnerability. They
+# are shown, they are never scored, and they never carry a CWE.
+SIGNAL_CATS = {"suppress"}
+
+
+# ---------------------------------------------------------- what a decoder can do
+#
+# "Insecure deserialization" is a property of the library, not of the word "load". These
+# are the three powers that matter, and only the first is CWE-502 remote code execution.
+#
+#   code   - reconstructs arbitrary objects or callables: pickle, Java, PHP, SnakeYAML
+#   type   - fills declared types only; a crafted document causes type confusion or a
+#            memory/recursion bomb, never code execution: Go yaml/gob/xml, js-yaml 4
+#   entity - resolves external entities: XML parsers with DTD enabled (XXE, not RCE)
+DESER_POWER = {
+    "py.pickle": ("code", "pickle executes `__reduce__` on load; a crafted payload is "
+                          "arbitrary code execution and the library documents this"),
+    "py.yaml_load": ("code", "PyYAML's non-safe loaders instantiate arbitrary Python "
+                             "objects through `!!python/object` tags"),
+    "py.marshal": ("code", "these rebuild an object graph from bytes"),
+    "py.np_pickle": ("code", "these loaders unpickle, so a crafted model file is code "
+                             "execution"),
+    "php.unserialize": ("code", "PHP unserialize invokes magic methods on the "
+                                "reconstructed object"),
+    "java.deser": ("code", "readObject runs on the reconstructed graph; gadget chains in "
+                           "common libraries turn this into code execution"),
+    "java.jackson_poly": ("code", "polymorphic typing lets the document choose the class "
+                                  "to instantiate"),
+    "rb.deser": ("code", "Marshal.load and YAML.load build arbitrary Ruby objects"),
+    "cs.deser": ("code", "BinaryFormatter and friends reconstruct arbitrary types"),
+    "js.deser": ("code", "these libraries rebuild functions from data"),
+    "js.yaml_full": ("code", "the full schema constructs JavaScript functions"),
+    "go.deser": ("type", "Go's yaml, gob and xml decoders fill declared struct fields and "
+                         "have no mechanism to construct a type the program did not name, "
+                         "so there is no code-execution path here"),
+    "js.yaml_load": ("type", "js-yaml 4's `load` is the safe loader and builds only plain "
+                             "values"),
+    "py.xml": ("entity", "an XML parser with entity resolution enabled reads local files "
+                         "and makes outbound requests, which is XXE rather than RCE"),
+}
+
+
+# Rules that describe a *setting* rather than an operation. For these, whether the line is
+# a vulnerability depends on who can turn it on: unconditional in a shipped code path is a
+# finding, reachable only when the operator passes an option is a documented capability.
+# `reach.py` answers that from the enclosing branch conditions.
+SETTING_RULES = {
+    "py.tls_off", "js.tls_off", "php.tls_off", "java.tls_off", "go.tls_off",
+    "cs.tls_off", "sh.tls_off", "js.cors_wild", "go.cors", "cfg.debug",
+    "cfg.k8s_priv", "js.jwt_weak", "cfg.ci_secret_echo",
+}
+
+# Rules whose match is a capability - "this file can build a command / a URL / a regex at
+# runtime" - which is true of a great deal of correct code. They need corroboration from
+# somewhere else before they are worth a human's attention: an untrusted source in the
+# file, a dangerous shape, or unquoted expansion. Without it they are context at most.
+CAPABILITY_RULES = {
+    "js.fetch_var", "js.regex_dyn", "sh.var_cmd", "py.open_var", "js.fs_var",
+    "py.subprocess_var", "py.weak_random", "js.math_random", "go.ssrf", "java.ssrf",
+    "py.open_var", "rb.send_file", "c.mem_ops", "c.alloc_math", "c.format",
+    "py.mktemp",
+}
+
+# Rules whose whole claim is "this name is the dangerous function", where the name can
+# just as easily belong to something harmless. `exec` is `child_process.exec` or it is
+# `promisify(execFile)` or it is `RegExp.prototype.exec`, and only the binding says
+# which. The value is the identity the rule needs in order to be right; `analysis.binding`
+# resolves what the name actually refers to, following local definitions and imports.
+IDENTITY_RULES = {
+    "js.child_exec": "shell",
+    "js.eval": "code",
+}
+
+# Rules whose match means nothing inside a string literal, because what they look for is
+# code. `command: `node -e "eval(Buffer.from('${s}','base64'))"`` is a command line being
+# assembled, not an eval in this file. Interpolation holes stay visible: `${...}` inside a
+# template literal is real code and is still searched.
+CODE_TEXT_RULES = {
+    "js.eval", "js.vm", "js.child_exec", "js.spawn_shell", "js.settimeout_str",
+    "py.exec", "py.eval", "py.compile", "py.subprocess_var", "py.os_exec",
+    "py.os_system", "php.eval", "rb.eval", "rb.exec", "c.system", "go.exec",
+    "java.exec",
+    # Deliberately not the shell rules. In shell, quoting is semantics rather than
+    # lexing - `"$x"` inside double quotes is still an expansion, it is just a safe one -
+    # and `semantics.unquoted_expansions` already walks the quote state properly. Masking
+    # by span here would be answering the same question twice, less carefully.
+}
+
+
+def tier_of(rule_id: str, weight: int, cat: str = "") -> str:
+    """Three tiers, because they answer different questions.
+
+    sink    - a specific dangerous operation, worth investigating
+    context - an ambient property of the file, worth reading
+    signal  - an observation about the code or its authors (`#nosec`, a security TODO).
+              A suppression comment is evidence that someone looked and decided to move on.
+              It is not a finding, and scoring it as one pushed clean files into the "low"
+              band for having a linter annotation.
+    """
+    if cat in SIGNAL_CATS:
+        return "signal"
+    if rule_id in CONTEXT_RULES:
+        return "context"
+    return "context" if weight <= 4 else "sink"
+
+
 def _compile(pattern: str, ci: bool):
     flags = re.MULTILINE
     if ci:
@@ -649,13 +837,23 @@ for _id, _cat, _title, _w, _langs, _pat, _ci, _why in RULES:
         COMPILED_RULES.append({
             "id": _id, "cat": _cat, "title": _title, "weight": _w,
             "langs": set(_langs), "rx": rx, "why": _why,
+            "tier": tier_of(_id, _w, _cat),
             "cwe": CATEGORIES.get(_cat, {}).get("cwe", ""),
         })
 
-COMPILED_SOURCES = [
-    {"id": i, "langs": set(l), "rx": _compile(p, False)}
-    for i, l, p in SOURCES if _compile(p, False)
-]
+COMPILED_BY_ID = {r["id"]: r for r in COMPILED_RULES}
+
+COMPILED_SOURCES = []
+for _row in SOURCES:
+    _sid, _slangs, _spat = _row[0], _row[1], _row[2]
+    _requires = _row[3] if len(_row) > 3 else ""
+    _srx = _compile(_spat, False)
+    if _srx is None:
+        continue
+    COMPILED_SOURCES.append({
+        "id": _sid, "langs": set(_slangs), "rx": _srx,
+        "requires": _compile(_requires, True) if _requires else None,
+    })
 COMPILED_ENTRYPOINTS = [
     {"id": i, "kind": k, "langs": set(l), "rx": _compile(p, False)}
     for i, k, l, p in ENTRYPOINTS if _compile(p, False)
@@ -666,7 +864,8 @@ COMPILED_NEG_SIGNALS = [(re.compile(p, re.I), f, label) for p, f, label in NEGAT
 
 def rule_count() -> dict:
     return {
-        "sinks": len(COMPILED_RULES),
+        "sinks": sum(1 for r in COMPILED_RULES if r["tier"] == "sink"),
+        "context": sum(1 for r in COMPILED_RULES if r["tier"] == "context"),
         "sources": len(COMPILED_SOURCES),
         "entrypoints": len(COMPILED_ENTRYPOINTS),
         "path_signals": len(COMPILED_PATH_SIGNALS),

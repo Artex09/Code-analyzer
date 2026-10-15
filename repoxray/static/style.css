@@ -24,6 +24,8 @@
 
   /* accents */
   --amber:     #ffb454;
+  /* the colour of "looked at and set aside": linter annotations and ruled-out matches */
+  --bronze:    #bfa66b;
   --amber-hot: #ffcd86;
   --amber-dim: #8a6425;
   --amber-ink: #2a1f0c;
@@ -588,6 +590,94 @@ a { color: var(--amber); text-decoration: none; }
 .viewer-side:empty { display: none; }
 .vs-block { padding: 9px 13px; border-bottom: 1px solid var(--line-soft); }
 .vs-block h4 { font-size: 8.5px; letter-spacing: .18em; color: var(--faint); margin: 0 0 7px; }
+.vs-block.ctx-block { opacity: .62; }
+.vs-block.ctx-block h4 { color: var(--ghost); }
+
+/* Matches the context pass ruled out. Visibly set aside - struck-through rule id, muted
+   code - but legible, because the reason is the interesting part and it has to be
+   arguable. A scanner that drops things silently cannot be checked. */
+.vs-block.vs-dismissed { background: color-mix(in srgb, var(--bg-2) 70%, transparent); }
+.vs-block.vs-dismissed h4 { color: var(--ghost); }
+.ruled { padding: 6px 0; border-top: 1px dotted var(--line-soft); cursor: pointer; }
+.ruled:first-of-type { border-top: 0; }
+.ruled:hover .ruled-code { color: var(--dim); }
+.ruled-head { display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap;
+  font-family: var(--label); font-size: 8.5px; letter-spacing: .1em;
+  text-transform: uppercase; margin-bottom: 3px; }
+.ruled-kind { color: var(--bronze, #bfa66b); }
+.ruled-rule { color: var(--ghost); text-decoration: line-through; }
+.ruled-head .jump { color: var(--amber); cursor: pointer; }
+.ruled-code { font-family: var(--code); font-size: 10.5px; color: var(--ghost);
+  white-space: pre-wrap; word-break: break-all; line-height: 1.5; margin-bottom: 3px; }
+.ruled-why { font-size: 11.5px; color: var(--dim); line-height: 1.55; }
+.ctxcount { font-size: 9px; color: var(--ghost); }
+.tbadge {
+  font-family: var(--label); font-size: 8.5px; color: var(--ok);
+  border: 1px solid #2c5f4a; border-radius: var(--radius); padding: 1px 5px;
+}
+.ebadge {
+  font-family: var(--label); font-size: 8px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: var(--radius); margin-left: 6px; white-space: nowrap;
+}
+.ebadge.high { background: #2c5f4a; color: #c9f5e2; }
+.ebadge.medium { background: #5a4a1f; color: #ffe3a8; }
+.ebadge.low { background: #3a3a44; color: var(--dim); }
+.ebadge.xfile { background: #2b3f63; color: #cfe0ff; }
+.ebadge.xfile.weak { background: #4a3a2a; color: #ffd9b0; }
+.tbadge.xf { color: #a8c6ff; border-color: #2b3f63; }
+.tbadge.wt { color: #ffd9a8; border-color: #5a4a1f; }
+.vs-hit.vs-taint { border-left: 2px solid var(--ok); padding-left: 7px; background: rgba(87,217,163,.04); }
+.vs-hit.vs-cross { border-left-color: #6f8fd0; background: rgba(111,143,208,.06); }
+.tsrc { color: var(--ok); font-size: 10.5px; }
+
+/* path conditions, solver witness, and the entry points of a cross-file flow */
+.glabel {
+  display: block; font-family: var(--label); font-size: 8px; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--ghost); margin: 6px 0 3px;
+}
+.guards { margin: 4px 0 2px; }
+.gcond {
+  display: block; font-family: var(--code); font-size: 10px; color: #b9a76e;
+  background: var(--panel-3); border-radius: var(--radius); padding: 2px 6px; margin: 2px 0;
+  white-space: pre-wrap; word-break: break-word;
+}
+.witness {
+  display: flex; align-items: baseline; gap: 7px; margin: 5px 0 2px;
+  border-left: 2px solid var(--amber-dim); padding-left: 7px;
+}
+.wlabel {
+  font-family: var(--label); font-size: 8px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--amber-dim); white-space: nowrap;
+}
+.witness code {
+  font-family: var(--code); font-size: 11px; color: #ffe3a8; background: #3b3119;
+  border-radius: var(--radius); padding: 1px 6px; word-break: break-all;
+}
+.xentries { margin: 4px 0 2px; }
+.xentry {
+  display: flex; gap: 8px; align-items: baseline; padding: 2px 0 2px 7px; cursor: pointer;
+  border-left: 1px dashed var(--line);
+}
+.xentry:hover { background: var(--panel-3); }
+.xentry code { font-family: var(--code); font-size: 10px; color: #a8c6ff; }
+.xentry span { font-size: 10px; color: var(--ghost); }
+.thop {
+  font-family: var(--code); font-size: 9.5px; color: #a8c6ff; margin: 5px 0 1px;
+  padding-left: 2px; border-top: 1px dotted var(--line); padding-top: 4px;
+}
+.trace { margin: 6px 0 2px; border-left: 1px dashed var(--line); padding-left: 8px; }
+.tstep {
+  display: grid; grid-template-columns: 14px 34px 1fr; gap: 6px; align-items: baseline;
+  padding: 2px 0; cursor: pointer; font-size: 10.5px;
+}
+.tstep:hover { background: var(--panel-3); }
+.tstep .tn { font-family: var(--label); font-size: 8px; color: var(--ghost); }
+.tstep .tl { font-family: var(--label); font-size: 9px; color: var(--amber-dim); }
+.tstep .tnote { color: var(--dim); }
+.tstep .tcode {
+  grid-column: 3; font-family: var(--code); font-size: 10px; color: #8d99a8;
+  white-space: pre; overflow: hidden; text-overflow: ellipsis; display: block;
+}
 .vs-hit { display: grid; grid-template-columns: 40px 1fr; gap: 9px; font-size: 10.5px; padding: 3px 0; cursor: pointer; }
 .vs-hit:hover { background: var(--panel-3); }
 .vs-hit .l { color: var(--amber-dim); text-align: right; font-size: 9.5px; }
@@ -643,6 +733,9 @@ a { color: var(--amber); text-decoration: none; }
 .modal-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 3px;
   padding: 26px 28px; max-width: 780px;
+  /* the help text grew with the engine; scroll inside the card rather than off-screen,
+     which would put "got it" out of reach */
+  max-height: 86vh; overflow-y: auto;
   box-shadow: 0 40px 100px rgba(0,0,0,.7), 0 0 0 1px rgba(255,180,84,.06);
   animation: rise .22s cubic-bezier(.2,.8,.2,1) both;
 }
@@ -692,3 +785,62 @@ kbd { font-family: var(--label); font-size: 9px; background: var(--panel-3); bor
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ---- verdicts, evidence and the four buckets -------------------------------- */
+/* A finding claims a bug. A lead says something is unproven and names what. They used to
+   look identical, which is how a name-based guess at weight 9 outranked a traced flow. */
+.vbadge {
+  font-family: var(--label); font-size: 8px; letter-spacing: .14em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: var(--radius); margin-right: 6px; white-space: nowrap;
+}
+.vbadge.found { background: #6d2b2b; color: #ffd9d9; }
+.vbadge.lead { background: #4a4330; color: #ffe7b8; }
+.vs-hit.vs-lead { border-left: 2px solid var(--amber-dim); padding-left: 7px; background: none; }
+.lead-block h4 { color: var(--amber-dim); }
+.sig-block { opacity: .55; }
+.sig-block h4 { color: var(--ghost); }
+.bnote { font-family: var(--sans); font-size: 9.5px; letter-spacing: 0; text-transform: none; color: var(--ghost); }
+
+.evid { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 3px; }
+.ecell {
+  font-family: var(--code); font-size: 9.5px; color: var(--dim);
+  background: var(--panel-3); border-radius: var(--radius); padding: 1px 6px;
+  border: 1px solid transparent;
+}
+.ecell i {
+  font-style: normal; font-family: var(--label); font-size: 8px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ghost); margin-right: 5px;
+}
+/* an unknown is the interesting part, so it is the part that is marked */
+.ecell.weak { color: #ffd9a8; border-color: #5a4a1f; background: #332b19; }
+.enotes { margin: 4px 0 2px; padding-left: 14px; list-style: none; }
+.enotes li {
+  font-size: 10px; color: var(--dim); line-height: 1.5; position: relative; padding: 1px 0;
+}
+.enotes li::before { content: "·"; position: absolute; left: -11px; color: var(--amber-dim); }
+.pat-block { opacity: .78; }
+.pat-block h4 { color: var(--dim); }
+
+/* the decomposed axes: one number hid which part was weak */
+.axes { display: flex; flex-wrap: wrap; gap: 3px; margin: 6px 0 2px; }
+.axis {
+  font-family: var(--label); font-size: 8px; letter-spacing: .08em; text-transform: uppercase;
+  padding: 2px 6px; border-radius: var(--radius); background: var(--panel-3); color: var(--dim);
+}
+.axis i {
+  font-style: normal; color: var(--ghost); margin-right: 5px; letter-spacing: .12em;
+}
+.axis.a-high { background: #2c5f4a; color: #c9f5e2; }
+.axis.a-medium, .axis.a-conditional, .axis.a-limited, .axis.a-partial { background: #5a4a1f; color: #ffe3a8; }
+.axis.a-low, .axis.a-unknown, .axis.a-unreadable { background: #4a3a2a; color: #ffd9b0; }
+.axis.a-none { background: #34343c; color: var(--dim); }
+.axis.a-direct, .axis.a-disclosure { background: #6d2b2b; color: #ffd9d9; }
+.axis.a-authorization, .axis.a-present, .axis.a-bypass-required { background: #3a3f5a; color: #cfe0ff; }
+
+/* the unknowns are the actionable part of a lead, so they are not buried in the notes */
+.unk { margin: 5px 0 3px; border-left: 2px solid #8a7a3a; padding-left: 8px; }
+.unk ul { margin: 2px 0 0; padding-left: 13px; list-style: none; }
+.unk li {
+  font-size: 10px; color: #e0cf9a; line-height: 1.5; position: relative; padding: 1px 0;
+}
+.unk li::before { content: "?"; position: absolute; left: -11px; color: #8a7a3a; }

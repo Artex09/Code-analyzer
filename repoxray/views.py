@@ -9,7 +9,8 @@ from . import rules
 
 SUMMARY_FIELDS = (
     "path", "name", "dir", "lang", "kind", "lines", "size", "score", "band",
-    "hit_count", "is_test", "is_vendored", "is_generated", "triage",
+    "hit_count", "context_count", "taint_count", "is_test", "is_vendored", "is_generated",
+    "triage",
 )
 
 TRIAGE_STATES = ("confirmed", "looking", "dismissed")

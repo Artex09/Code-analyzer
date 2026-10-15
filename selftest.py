@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import html
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -51,11 +53,20 @@ def main() -> int:
         return 2
 
     print("driving " + base + " with " + Path(browser).name + " ...")
-    proc = subprocess.run(
-        [browser, "--headless=new", "--disable-gpu", "--no-sandbox", "--window-size=1500,950",
-         "--dump-dom", "--virtual-time-budget=60000", base + "/static/_selftest.html"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
-    )
+    # A throwaway profile, so the run can never be scored against a cached app.js or
+    # stylesheet. That has already happened once: three checks failed against code that was
+    # correct on disk, which is the worst kind of test result.
+    profile = tempfile.mkdtemp(prefix="repoxray-selftest-")
+    try:
+        proc = subprocess.run(
+            [browser, "--headless=new", "--disable-gpu", "--no-sandbox",
+             "--window-size=1500,950", "--user-data-dir=" + profile,
+             "--disable-features=NetworkServiceInProcess", "--disk-cache-size=1",
+             "--dump-dom", "--virtual-time-budget=60000", base + "/static/_selftest.html"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300,
+        )
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
     m = re.search(r'<div id="out">(.*?)</div>', proc.stdout or "", re.S)
     if not m:
         print("the test page produced no result (did it finish loading?)")

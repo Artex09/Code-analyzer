@@ -3,5 +3,23 @@ requests>=2.31
 Pygments>=2.17
 Jinja2>=3.1
 
+# AST + dataflow analysis. Each grammar is optional: a missing one means that language
+# falls back to the pattern pass instead of failing the scan.
+tree-sitter>=0.23
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+tree-sitter-php
+tree-sitter-java
+tree-sitter-go
+tree-sitter-ruby
+tree-sitter-c-sharp
+
+# Path-sensitive analysis. Branch conditions on the way to a sink are handed to Z3, which
+# decides whether they can hold at all and whether they still admit a payload. Optional:
+# without it findings keep their guards but nothing is suppressed on that basis, and the
+# console says so in the capability line.
+z3-solver>=4.12
+
 # optional, only needed for the Claude deep-dive backend
 # anthropic>=0.40

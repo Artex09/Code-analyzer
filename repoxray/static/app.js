@@ -8,6 +8,18 @@ const BAND_MIN = { critical: 75, high: 55, medium: 35, low: 15, minimal: 0 };
 const BAND_COLOR = { critical: "#ff4d4f", high: "#ff8c42", medium: "#ffd166", low: "#5aa9ff", minimal: "#5d6672" };
 const TRIAGE = ["confirmed", "looking", "dismissed"];
 const TRIAGE_MARK = { confirmed: "\u25c9", looking: "\u25d0", dismissed: "\u25cb" };
+
+// Why the context pass took a pattern match off the board. Shown instead of deleting it,
+// because a scanner you cannot argue with is one you cannot trust either.
+const DISMISS_LABEL = {
+  reviewed: "a reviewer silenced it, and said why",
+  "not-a-secret": "the literal is a public identifier",
+  placeholder: "the literal is a placeholder",
+  capability: "a capability, with nothing corroborating a flaw",
+  "opt-in": "only reachable if the operator turns it on",
+  "no-victim": "no attacker for that class in this deployment",
+  "wrong-function": "this name is a different function than the rule means",
+};
 const PREF_KEY = "repoxray.prefs.v1";
 
 const S = {
@@ -127,8 +139,22 @@ async function boot() {
     return;
   }
   const rc = S.boot.rules;
-  $("rule-count").textContent = rc.sinks + " sinks / " + rc.sources + " sources / "
-    + rc.entrypoints + " entries / " + rc.categories + " classes";
+  const caps = S.boot.analysis || {};
+  const solver = caps._solver || {};
+  const xfile = caps._cross_file || {};
+  const langCaps = Object.entries(caps).filter(([l]) => !l.startsWith("_"));
+  const deepLangs = langCaps.filter(([, c]) => c.parser && c.depth === "full").map(([l]) => l);
+  $("rule-count").textContent = rc.sinks + " sinks / dataflow: "
+    + (deepLangs.length ? deepLangs.length + " languages" : "unavailable")
+    + " / solver: " + (solver.available ? "z3" : "off")
+    + " / cross-file: " + (xfile.available ? "on" : "off");
+  $("rule-count").title = "Pattern rules: " + rc.sinks + " sinks, " + rc.sources
+    + " sources, " + rc.entrypoints + " entrypoints.\nAST + dataflow: "
+    + langCaps.filter(([, c]) => c.parser).map(([l, c]) => l + " (" + c.depth + ")").join(", ")
+    + "\nPath conditions: " + (solver.available
+      ? "z3 " + solver.version + ", payload models for " + (solver.classes || []).join(", ")
+      : solver.note || "unavailable")
+    + "\nCross-file links: " + (xfile.languages || []).join(", ");
 
   if (!S.boot.views.some((v) => v.id === S.viewId)) S.viewId = "risk";
   const wanted = new URLSearchParams(location.search).get("view");
@@ -304,7 +330,9 @@ function wireEvents() {
       const job = await api("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, refresh: $("refresh-input").checked }),
+        body: JSON.stringify({ url, refresh: $("refresh-input").checked,
+                               deep: $("deep-input").checked,
+                               cross: $("cross-input").checked }),
       });
       pollJob(job.id);
     } catch (e) {
@@ -319,6 +347,7 @@ function wireEvents() {
   $("btn-ai-file").onclick = () => S.openPath && runDeepDive([S.openPath]);
   $("btn-triage").onclick = () => cycleTriage(S.openPath);
   $("btn-copy").onclick = copyEvidence;
+  $("btn-verify").onclick = () => copyVerifyPrompt();
   $("job-toggle").onclick = () => { $("job-log").hidden = !$("job-log").hidden; };
   $("btn-help").onclick = () => { $("help-modal").hidden = false; };
   $("help-close").onclick = () => { $("help-modal").hidden = true; };
@@ -783,7 +812,11 @@ function rowHtml(it) {
       </span>
       <span class="rowright">
         ${it.cat_weight ? `<span>w ${it.cat_weight}</span>` : ""}
+        ${it.taint_count ? `<span class="tbadge" title="traced by dataflow analysis">${it.taint_count} dataflow</span>` : ""}
+        ${it.cross_count ? `<span class="tbadge xf" title="flow that crosses a file boundary">${it.cross_count} cross-file</span>` : ""}
+        ${it.witness_count ? `<span class="tbadge wt" title="the solver produced a payload that passes every check on the path">${it.witness_count} witness</span>` : ""}
         ${it.hit_count ? `<span class="hitcount">${it.hit_count} hits</span>` : ""}
+        ${it.context_count ? `<span class="ctxcount" title="ambient context signals, not findings">+${it.context_count} ctx</span>` : ""}
         ${ai}${tri}
       </span>
     </div>${evHtml}`;
@@ -962,14 +995,104 @@ async function openFile(path, jumpLine) {
       `<span class="ln">${n}</span><span class="src">${html || " "}</span></div>`;
   }).join("");
 
-  const hitBlock = (data.hits || []).length ? `<div class="vs-block">
-      <h4>pattern hits (${data.hits.length})</h4>
-      ${data.hits.map((h) => `<div class="vs-hit" data-jump="${h.line}">
+  const FLOW = ["taint", "xtaint", "xentry"];
+  const hitRow = (h) => {
+    const flow = FLOW.includes(h.engine);
+    const cross = h.engine === "xtaint" || h.engine === "xentry";
+    const here = data.path;
+    // a cross-file trace walks through other files: show the path when it changes, and
+    // only make a hop clickable when it is in the file currently open
+    let lastPath = "";
+    const trace = (h.trace || []).map((s, i) => {
+      const where = s.path || here;
+      const shifted = where !== lastPath;
+      lastPath = where;
+      const jump = where === here ? ` data-jump="${s.line}"` : ` data-open="${esc(where)}#${s.line}"`;
+      return `
+        ${shifted && where !== here ? `<div class="thop">${esc(where)}</div>` : ""}
+        <div class="tstep"${jump}>
+          <span class="tn">${i + 1}</span><span class="tl">L${s.line}</span>
+          <span class="tnote">${esc(s.note)}</span>
+          <code class="tcode">${esc(s.code || "")}</code>
+        </div>`;
+    }).join("");
+
+    const guards = (h.guards || []).length ? `<div class="guards">
+        <span class="glabel">path conditions</span>
+        ${h.guards.map((g) => `<code class="gcond">${esc(g)}</code>`).join("")}
+      </div>` : "";
+    const witness = h.witness ? `<div class="witness" title="A value the solver found that satisfies every check above and still carries a payload">
+        <span class="wlabel">solver witness</span><code>${esc(h.witness)}</code></div>` : "";
+    const entries = (h.cross && (h.cross.entries || []).length > 1) ? `<div class="xentries">
+        <span class="glabel">reached from ${h.cross.entry_count} call site${h.cross.entry_count === 1 ? "" : "s"}</span>
+        ${h.cross.entries.map((e) => `<div class="xentry" data-open="${esc(e.path)}#${e.line}">
+            <code>${esc(e.path)}:${e.line}</code> <span>${esc(e.source)}</span></div>`).join("")}
+      </div>` : "";
+    const xbadge = cross ? `<span class="ebadge xfile ${h.cross && h.cross.weak ? "weak" : ""}"
+        title="${esc((h.cross && h.cross.link) || "")} link, ${(h.cross && h.cross.hops) || 1} hop(s)">${
+      h.engine === "xentry" ? "leaves this file" : "cross-file"} &middot; ${esc(h.confidence)}</span>` : "";
+
+    // The evidence, itemised. One number hid the difference between a traced flow from a
+    // typed framework object and a guess based on a parameter name.
+    const ev = h.evidence || {};
+    const unknown = (v) => v === "unknown" || v === "assumed" || v === "opaque";
+    const cell = (label, value) => value ? `<span class="ecell${
+      unknown(value) ? " weak" : ""}"><i>${label}</i>${esc(String(value))}</span>` : "";
+    const evidence = (h.tier === "sink" && Object.keys(ev).length) ? `<div class="evid">
+        ${cell("source", ev.source)}${cell("value", ev.value)}${cell("sink", ev.sink)}
+        ${cell("arg", ev.role)}${cell("flow", ev.flow)}${cell("guard", ev.guard)}
+        ${ev.hops ? cell("hops", ev.hops) : ""}
+      </div>` : "";
+    // The decomposed axes, so "overall: low" can be argued with rather than just believed.
+    const bd = ev.breakdown || {};
+    const axes = Object.keys(bd).length ? `<div class="axes">${
+      ["source", "sink", "guard", "exploitability", "overall"].filter((k) => bd[k])
+        .map((k) => `<span class="axis a-${esc(String(bd[k]))}"><i>${k}</i>${
+          esc(String(bd[k]))}</span>`).join("")}</div>` : "";
+    // What the analyser could not settle. This is the part worth acting on first.
+    const unknowns = (ev.unknowns || []).length ? `<div class="unk">
+        <span class="glabel">could not determine</span>
+        <ul>${ev.unknowns.map((u) => `<li>${esc(u)}</li>`).join("")}</ul></div>` : "";
+    const notes = (ev.notes || []).length ? `<ul class="enotes">${
+      ev.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : "";
+    const vbadge = (h.tier === "sink" && h.verdict) ? `<span class="vbadge ${
+      h.verdict === "lead" ? "lead" : "found"}">${h.verdict === "lead" ? "lead" : "finding"}</span>` : "";
+
+    return `<div class="vs-hit${flow ? " vs-taint" : ""}${cross ? " vs-cross" : ""}${
+      h.verdict === "lead" ? " vs-lead" : ""}" data-jump="${h.line}">
         <span class="l">L${h.line}</span>
-        <span class="t"><b>${esc(h.title)}</b> &middot; ${esc(h.cwe || h.cat)} &middot; w${h.weight}
-          <br><span style="color:var(--faint)">${esc(h.why)}</span></span>
-      </div>`).join("")}
-    </div>` : "";
+        <span class="t">${vbadge}<b>${esc(h.title)}</b> &middot; ${esc(h.cwe || h.cat)} &middot; w${h.weight}
+          ${flow && !cross ? `<span class="ebadge ${esc(h.confidence)}">dataflow &middot; ${esc(h.confidence)}</span>` : ""}
+          ${xbadge}
+          <br><span style="color:var(--faint)">${esc(h.why)}</span>
+          ${flow && h.source ? `<br><span class="tsrc">from ${esc(h.source)}${
+            (h.sanitizers || []).length ? " &middot; via " + esc(h.sanitizers.join(", ")) : ""}</span>` : ""}
+          ${axes}${evidence}${unknowns}${notes}${guards}${witness}${entries}
+          ${trace ? `<div class="trace">${trace}</div>` : ""}
+        </span>
+      </div>`;
+  };
+  const rank = (h) => (h.engine === "xtaint" ? 3 : h.engine === "taint" ? 2
+    : h.engine === "xentry" ? 1 : 0);
+  // Four buckets, because they answer four different questions. A claimed vulnerability, a
+  // lead that needs a human, a property of the file, and an observation about it were all
+  // in one list before, which made the list meaningless.
+  const all = data.hits || [];
+  const byLine = (a, b) => rank(b) - rank(a) || b.weight - a.weight || a.line - b.line;
+  const confirmed = all.filter((h) => h.verdict === "finding").sort(byLine);
+  const leads = all.filter((h) => h.verdict === "lead").sort(byLine);
+  const pattern = all.filter((h) => h.tier === "sink" && !h.verdict).sort(byLine);
+  const ctx = all.filter((h) => h.tier === "context").sort(byLine);
+  const signals = all.filter((h) => h.tier === "signal").sort((a, b) => a.line - b.line);
+  const block = (cls, title, note, items) => items.length ? `<div class="vs-block ${cls}">
+      <h4>${title} (${items.length})${note ? ` &middot; <span class="bnote">${note}</span>` : ""}</h4>
+      ${items.map(hitRow).join("")}</div>` : "";
+  const hitBlock =
+    block("", "findings", "source, sink and flow all established", confirmed)
+    + block("lead-block", "leads", "something is unproven &mdash; the detail is on each row", leads)
+    + block("pat-block", "pattern matches", "no flow was traced to these; read them yourself", pattern)
+    + block("ctx-block", "context", "properties of this file, not claims about a bug", ctx)
+    + block("sig-block", "signals", "observations, never scored", signals);
   const ai = data.ai;
   const aiBlock = ai ? `<div class="vs-block">
       <h4>ai verdict ${ai.error ? "(failed)" : (ai.probability + "% / " + esc(ai.confidence || ""))}</h4>
@@ -986,13 +1109,40 @@ async function openFile(path, jumpLine) {
   const sig = [];
   if ((rec.entrypoints || []).length) sig.push("entrypoints: " + rec.entrypoints.map((e) => e.kind).join(", "));
   if ((rec.sources || []).length) sig.push("input: " + rec.sources.map((s) => s.id.replace("src.", "")).join(", "));
-  if ((rec.path_signals || []).length) sig.push("path: " + rec.path_signals.map((s) => s.label).join(", "));
+  if ((rec.path_signals || []).length) sig.push("path words (not scored): " + rec.path_signals.map((s) => s.label).join(", "));
   const sigBlock = sig.length ? `<div class="vs-block"><h4>context</h4>
     <div style="font-family:var(--code);font-size:11px;color:var(--dim);line-height:1.65">${esc(sig.join(" | "))}</div></div>` : "";
 
-  $("viewer-side").innerHTML = aiBlock + hitBlock + sigBlock;
+  // Matches the context pass took off the board. Shown rather than deleted: a scanner
+  // that silently drops things cannot be argued with, and a dismissal is a claim about
+  // the code that deserves to be checked like any other.
+  const dis = rec.dismissed || [];
+  const disBlock = dis.length ? `<div class="vs-block vs-dismissed">
+    <h4>${dis.length} ${dis.length === 1 ? "match" : "matches"} ruled out here</h4>
+    ${dis.map((d) => `<div class="ruled" data-jump="${d.line}">
+      <div class="ruled-head"><span class="ruled-kind">${esc(DISMISS_LABEL[d.kind] || d.kind)}</span>
+        <span class="ruled-rule">${esc(d.rule)}</span><span class="jump">L${d.line}</span></div>
+      <div class="ruled-code">${esc(d.snippet)}</div>
+      <div class="ruled-why">${esc(d.why)}</div>
+    </div>`).join("")}
+  </div>` : "";
+
+  const notes = rec.context_notes || [];
+  const noteBlock = notes.length ? `<div class="vs-block"><h4>reading this file</h4>
+    ${notes.map((n) => `<div class="f-text" style="font-size:12px">${esc(n)}</div>`).join("")}
+  </div>` : "";
+
+  $("viewer-side").innerHTML = aiBlock + hitBlock + noteBlock + sigBlock + disBlock;
   $("viewer-side").querySelectorAll("[data-jump]").forEach((el) => {
     el.onclick = () => jumpTo(parseInt(el.dataset.jump, 10));
+  });
+  // a hop in another file: follow the flow there instead of jumping inside this one
+  $("viewer-side").querySelectorAll("[data-open]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const [other, line] = el.dataset.open.split("#");
+      openFile(other, line ? parseInt(line, 10) : undefined);
+    };
   });
 
   $("view-body").querySelectorAll(".open").forEach((el) => el.classList.remove("open"));
@@ -1128,18 +1278,39 @@ async function copyEvidence() {
       if (f.needs_to_confirm) lines.push("  - to confirm: " + f.needs_to_confirm);
     });
   }
-  const text = lines.join("\n");
+  await toClipboard(lines.join("\n"),
+    "evidence for " + splitPath(d.path).name + " copied as markdown");
+}
+
+async function toClipboard(text, label) {
   try {
     await navigator.clipboard.writeText(text);
-    toast("evidence for " + splitPath(d.path).name + " copied as markdown", "good");
+    toast(label, "good");
+    return true;
   } catch (e) {
     const ta = document.createElement("textarea");
     ta.value = text;
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand("copy"); toast("evidence copied", "good"); }
-    catch (e2) { toast("could not copy to clipboard", "bad"); }
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e2) { ok = false; }
     ta.remove();
+    toast(ok ? label : "could not reach the clipboard", ok ? "good" : "bad");
+    return ok;
+  }
+}
+
+/* a self-contained prompt for checking the finding in whatever model you use */
+async function copyVerifyPrompt(line) {
+  if (!S.openPath) { toast("open a file first", "bad"); return; }
+  let q = "/api/scan/" + S.scanId + "/verify?path=" + encodeURIComponent(S.openPath);
+  if (line) q += "&line=" + line;
+  try {
+    const d = await api(q);
+    await toClipboard(d.prompt,
+      "verification prompt copied (~" + num(d.approx_tokens) + " tokens) - paste it to your model");
+  } catch (e) {
+    toast("could not build the prompt: " + e.message, "bad");
   }
 }
 
@@ -1361,6 +1532,7 @@ function onKey(ev) {
     return;
   }
   if (ev.key === "y") { copyEvidence(); return; }
+  if (ev.key === "v") { copyVerifyPrompt(); return; }
   if (ev.key === "a" && S.openPath) { runDeepDive([S.openPath]); return; }
   if (ev.key === "r" && S.scanId) { window.location = "/api/scan/" + S.scanId + "/report.md"; return; }
   if (ev.key === "?") { $("help-modal").hidden = false; }

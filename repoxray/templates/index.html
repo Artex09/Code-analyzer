@@ -27,6 +27,12 @@
     <label class="mini-check" title="Discard the cached copy and clone again">
       <input type="checkbox" id="refresh-input"><span>re-fetch</span>
     </label>
+    <label class="mini-check" title="Parse each file and follow untrusted data to its sinks, asking the solver whether the branch conditions on the way can hold. Slower, far more precise.">
+      <input type="checkbox" id="deep-input" checked><span>dataflow</span>
+    </label>
+    <label class="mini-check" title="Resolve imports and follow a flow from one file into the function it calls in another. Needs dataflow.">
+      <input type="checkbox" id="cross-input" checked><span>cross-file</span>
+    </label>
     <button type="submit" id="scan-btn">analyse</button>
   </form>
 
@@ -121,6 +127,7 @@
       <div class="viewer-actions">
         <button class="ghost" id="btn-triage" title="Cycle triage state (t)">mark</button>
         <button class="ghost" id="btn-copy" title="Copy this file's evidence as markdown (y)">copy</button>
+        <button class="ghost" id="btn-verify" title="Copy a ready-to-paste prompt asking an AI model whether this is real (v)">verify</button>
         <button class="ghost" id="btn-ai-file" title="Send just this file to the model (a)">ai read</button>
         <a class="ghost" id="btn-gh" target="_blank" rel="noreferrer" title="Open on GitHub">github</a>
         <button class="ghost" id="btn-close-viewer" title="Close (esc)">close</button>
@@ -171,6 +178,18 @@
         <p>Scores saturate: 0-15 minimal, 15-35 low, 35-55 medium, 55-75 high, 75+ critical.
         A hit is a lead, never proof &mdash; mark what you confirm, dismiss what you rule out, and
         the report orders itself around your calls.</p>
+        <h4>the dataflow pass</h4>
+        <p>With <b>dataflow</b> on, each file in a modelled language is parsed to an AST and
+        untrusted values are followed to their sinks, so a finding arrives with the trace it
+        followed. Branch conditions on the way are handed to a solver: if they contradict each
+        other, or if no value that survives them could be a payload, the finding is deleted
+        instead of shown. When a payload does survive, the solver prints one &mdash; the
+        <b>witness</b> is generated from the constraints, so treat it as the first thing to try,
+        not as a tested exploit.</p>
+        <p>With <b>cross-file</b> on, imports are resolved and a flow is followed out of one file
+        into the function it calls in another. Those findings sit on the file holding the sink and
+        list every call site that reaches it; clicking one follows the flow back to the route.
+        A link marked <i>weak</i> was matched by name alone &mdash; check it before trusting it.</p>
       </div>
       <div>
         <h4>shortcuts</h4>

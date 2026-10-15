@@ -1,0 +1,26 @@
+# Python bytecode and build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime working directory: cloned repositories and scan records.
+# store.py creates both on startup, so nothing here needs to be in the repo.
+# Clones are other people's code; scan records are generated output and can name
+# findings in a live target, so they stay local.
+data/repos/
+data/scans/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
